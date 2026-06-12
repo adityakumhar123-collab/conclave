@@ -1,0 +1,38 @@
+# Node / React Native
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.expo/
+.expo-shared/
+
+# React Native build artifacts
+android/app/build/
+android/build/
+ios/build/
+
+# General build folders
+build/
+dist/
+
+# Python / misc if needed later
+__pycache__/
+
+# Firmware build output
+.pio/
+build/
+.cache/
+lib/
+scratch/
+# Secrets
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+.git/
+android/
+.claude/
+dist/
