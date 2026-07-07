@@ -55,7 +55,8 @@
           ],
           "bluetoothAlwaysPermission": "This app uses Bluetooth to connect and monitor telemetry from your SafeBand device."
         }
-      ]
+      ],
+      "expo-sqlite"
     ]
   }
 }

@@ -12,7 +12,7 @@ export function computeThreatScoreDetailed(packet, contextConfig = {}) {
   // Anomaly score is scaled relative to the 3-sigma threshold (128 = threshold boundary)
   const normalizedScore = packet.anomalyScore / 128.0;
   logs.push(`Raw anomaly score: ${packet.anomalyScore} (Normalized: ${normalizedScore.toFixed(3)})`);
-  
+
   // Weights based on motion state bitmask:
   // Bit 0: Still, Bit 1: Periodic, Bit 2: Aperiodic, Bit 3: High-Impact, Bit 4: Restrained
   let patternWeight = 0.40; // Default weight for UNKNOWN
@@ -76,7 +76,7 @@ export function computeThreatScoreDetailed(packet, contextConfig = {}) {
     durationFactor = Math.max(minDurationFactor, 0.95); // Sustained anomaly
   }
   threatScore *= durationFactor;
-  logs.push(`Anomaly Duration: ${durationSec.toFixed(1)}s | Score confidence: ${Math.round(scoreConfidence*100)}% | DurationFactor: ${durationFactor.toFixed(2)}, threat score: ${threatScore.toFixed(3)}`);
+  logs.push(`Anomaly Duration: ${durationSec.toFixed(1)}s | Score confidence: ${Math.round(scoreConfidence * 100)}% | DurationFactor: ${durationFactor.toFixed(2)}, threat score: ${threatScore.toFixed(3)}`);
 
   // 3. Post-Anomaly Stillness Bonus
   if (postAnomalyStillness) {
@@ -126,9 +126,9 @@ export function computeThreatScoreDetailed(packet, contextConfig = {}) {
   };
 }
 
-export function computeThreatScore(packet, contextConfig = {}) {
-  return computeThreatScoreDetailed(packet, contextConfig).score;
-}
+// export function computeThreatScore(packet, contextConfig = {}) {
+//   return computeThreatScoreDetailed(packet, contextConfig).score;
+// }
 
 export function getThreatLevel(score) {
   if (score < 0.40) return { name: 'NORMAL', color: '#10B981', action: 'Log event silently' };

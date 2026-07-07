@@ -188,6 +188,7 @@ function parseSensorPacket(bytes) {
   };
 }
 
+/*
 // Helper to pack values into a Uint8Array with an XOR checksum at the end
 function buildPacket(bytesList) {
   const bytes = new Uint8Array(bytesList.length + 1);
@@ -381,3 +382,4 @@ export function generateMockPacket(type, params = {}) {
 
   return null;
 }
+*/
