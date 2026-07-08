@@ -79,6 +79,7 @@ export default function useBle(activeTab, addLog) {
     eigenvalueRatio: 500,
     zcr: 30,
     spectralEntropy: 60,
+    motionEmbedding: new Array(16).fill(0),
   });
 
   const bleManagerRef = useRef(null);
@@ -145,12 +146,14 @@ export default function useBle(activeTab, addLog) {
           (parsed.eigenvalueRatio !== undefined && parsed.eigenvalueRatio !== prev.eigenvalueRatio) ||
           (parsed.zcr !== undefined && parsed.zcr !== prev.zcr) ||
           (parsed.spectralEntropy !== undefined && parsed.spectralEntropy !== prev.spectralEntropy) ||
-          (parsed.wearConfidence !== undefined && parsed.wearConfidence !== prev.wearConfidence);
+          (parsed.wearConfidence !== undefined && parsed.wearConfidence !== prev.wearConfidence) ||
+          (parsed.motionEmbedding !== undefined && JSON.stringify(parsed.motionEmbedding) !== JSON.stringify(prev.motionEmbedding));
 
         if (!hasChanged) return prev;
 
         return {
           ...prev,
+          sequenceId: parsed.sequenceId !== undefined ? parsed.sequenceId : prev.sequenceId,
           anomalyScore: parsed.anomalyScore !== undefined ? parsed.anomalyScore : prev.anomalyScore,
           anomalyDuration: parsed.anomalyDuration !== undefined ? parsed.anomalyDuration : prev.anomalyDuration,
           motionState: parsed.motionState !== undefined ? parsed.motionState : prev.motionState,
@@ -160,6 +163,7 @@ export default function useBle(activeTab, addLog) {
           zcr: parsed.zcr !== undefined ? parsed.zcr : prev.zcr,
           spectralEntropy: parsed.spectralEntropy !== undefined ? parsed.spectralEntropy : prev.spectralEntropy,
           wearConfidence: parsed.wearConfidence !== undefined ? parsed.wearConfidence : prev.wearConfidence,
+          motionEmbedding: parsed.motionEmbedding !== undefined ? parsed.motionEmbedding : prev.motionEmbedding,
         };
       });
       if (parsed.wearConfidence !== undefined) setWearConfidence(parsed.wearConfidence);
@@ -171,10 +175,12 @@ export default function useBle(activeTab, addLog) {
       if (parsed.motionState & (1 << 3)) motionNames.push('HIGH-IMPACT');
       if (parsed.motionState & (1 << 4)) motionNames.push('RESTRAINED');
 
+      const embStr = parsed.motionEmbedding ? `[${parsed.motionEmbedding.map(x => x.toFixed(2)).join(', ')}]` : 'N/A';
+
       addLog(
         `TinyML Live Features: Score=${parsed.anomalyScore} | ZCR=${parsed.zcr} Entropy=${parsed.spectralEntropy} | ` +
         `Motion=0x${parsed.motionState.toString(16).toUpperCase()} (${motionNames.join('+')}) Freq=${parsed.dominantFreq.toFixed(1)}Hz | ` +
-        `Linearity=${parsed.eigenvalueRatio} Peak=${parsed.peakAccel}mg | Wear=${parsed.wearConfidence}%`,
+        `Linearity=${parsed.eigenvalueRatio} Peak=${parsed.peakAccel}mg | Wear=${parsed.wearConfidence}% | Emb=${embStr}`,
         'TINYML'
       );
     } else if (parsed.type === 'EVENT') {
@@ -188,7 +194,8 @@ export default function useBle(activeTab, addLog) {
           (parsed.eigenvalueRatio !== undefined && parsed.eigenvalueRatio !== prev.eigenvalueRatio) ||
           (parsed.zcr !== undefined && parsed.zcr !== prev.zcr) ||
           (parsed.spectralEntropy !== undefined && parsed.spectralEntropy !== prev.spectralEntropy) ||
-          (parsed.wearConfidence !== undefined && parsed.wearConfidence !== prev.wearConfidence);
+          (parsed.wearConfidence !== undefined && parsed.wearConfidence !== prev.wearConfidence) ||
+          (parsed.motionEmbedding !== undefined && JSON.stringify(parsed.motionEmbedding) !== JSON.stringify(prev.motionEmbedding));
 
         if (!hasChanged) return prev;
 
@@ -203,18 +210,20 @@ export default function useBle(activeTab, addLog) {
           zcr: parsed.zcr !== undefined ? parsed.zcr : prev.zcr,
           spectralEntropy: parsed.spectralEntropy !== undefined ? parsed.spectralEntropy : prev.spectralEntropy,
           wearConfidence: parsed.wearConfidence !== undefined ? parsed.wearConfidence : prev.wearConfidence,
+          motionEmbedding: parsed.motionEmbedding !== undefined ? parsed.motionEmbedding : prev.motionEmbedding,
         };
       });
       if (parsed.battery !== undefined) setBatteryPct(parsed.battery);
       if (parsed.wearConfidence !== undefined) setWearConfidence(parsed.wearConfidence);
 
-      addLog(`⚠️ TinyML ALERT RECEIVED: Score=${parsed.anomalyScore} Conf=${parsed.confidence}% Peak=${parsed.peakAccel}mg Dur=${parsed.anomalyDuration}x100ms`, 'TINYML');
+      const embStr = parsed.motionEmbedding ? `[${parsed.motionEmbedding.join(', ')}]` : 'N/A';
+      addLog(`⚠️ TinyML ALERT RECEIVED: Score=${parsed.anomalyScore} Conf=${parsed.confidence}% Peak=${parsed.peakAccel}mg Dur=${parsed.anomalyDuration}x100ms | Emb=${embStr}`, 'TINYML');
     } else if (parsed.type === 'STATUS') {
       if (parsed.battery !== undefined) setBatteryPct(parsed.battery);
       if (parsed.wearConfidence !== undefined) setWearConfidence(parsed.wearConfidence);
       if (parsed.uptime !== undefined) setUptime(parsed.uptime);
 
-      addLog(`Heartbeat: Battery=${parsed.battery}% Wear=${parsed.wearConfidence}% Uptime=${parsed.uptime}m AvgAnomaly=${parsed.avgAnomaly} Inference=${parsed.inferenceRate}Hz`, 'TINYML');
+      addLog(`Heartbeat: Battery=${parsed.battery}% Wear=${parsed.wearConfidence}% Uptime=${parsed.uptime}m AvgAnomaly=${parsed.avgAnomaly} Inference=${parsed.inferenceRate}Hz Flags=0x${(parsed.systemFlags || 0).toString(16).toUpperCase()}`, 'TINYML');
     }
   };
 
@@ -321,6 +330,7 @@ export default function useBle(activeTab, addLog) {
         if (charInfo && charInfo.value) {
           const rawString = decodeBase64ToString(charInfo.value);
           console.log('[BLE] Connected Device Info:', rawString);
+          addLog(`Device Info: ${rawString}`, 'SYSTEM');
         }
       } catch (err) {
         console.warn('[BLE] Read firmware version failed:', err);

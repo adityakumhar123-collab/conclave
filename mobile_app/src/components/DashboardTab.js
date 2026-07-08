@@ -1,7 +1,120 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, ScrollView } from 'react-native';
-import Svg, { Circle } from 'react-native-svg';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { View, Text, TouchableOpacity, ActivityIndicator, ScrollView, Platform } from 'react-native';
+import Svg, { Circle, Line } from 'react-native-svg';
 import styles from './styles';
+
+// Jacobi eigenvalue algorithm for symmetric matrix (Covariance matrix)
+function jacobiEigenvalue(A, maxIter = 50) {
+  const n = A.length;
+  const V = Array.from({ length: n }, (_, i) =>
+    Array.from({ length: n }, (_, j) => (i === j ? 1 : 0))
+  );
+  
+  const mat = A.map(row => [...row]);
+  
+  for (let iter = 0; iter < maxIter; iter++) {
+    let p = 0;
+    let q = 1;
+    let maxVal = Math.abs(mat[0][1]);
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        if (Math.abs(mat[i][j]) > maxVal) {
+          maxVal = Math.abs(mat[i][j]);
+          p = i;
+          q = j;
+        }
+      }
+    }
+    
+    if (maxVal < 1e-6) break;
+    
+    const ap = mat[p][p];
+    const aq = mat[q][q];
+    const apq = mat[p][q];
+    
+    const theta = 0.5 * Math.atan2(2 * apq, aq - ap);
+    const c = Math.cos(theta);
+    const s = Math.sin(theta);
+    
+    mat[p][p] = c * c * ap - 2 * s * c * apq + s * s * aq;
+    mat[q][q] = s * s * ap + 2 * s * c * apq + c * c * aq;
+    mat[p][q] = 0;
+    mat[q][p] = 0;
+    
+    for (let i = 0; i < n; i++) {
+      if (i !== p && i !== q) {
+        const aip = mat[i][p];
+        const aiq = mat[i][q];
+        mat[i][p] = c * aip - s * aiq;
+        mat[p][i] = mat[i][p];
+        mat[i][q] = s * aip + c * aiq;
+        mat[q][i] = mat[i][q];
+      }
+    }
+    
+    for (let i = 0; i < n; i++) {
+      const vip = V[i][p];
+      const viq = V[i][q];
+      V[i][p] = c * vip - s * viq;
+      V[i][q] = s * vip + c * viq;
+    }
+  }
+  
+  const eigenvalues = mat.map((row, i) => row[i]);
+  return { eigenvalues, eigenvectors: V };
+}
+
+// Compute PCA and project data onto top 2 PCs
+function computePCA(data) {
+  const N = data.length;
+  const D = data[0].length;
+  
+  const means = Array(D).fill(0);
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < D; j++) {
+      means[j] += data[i][j];
+    }
+  }
+  for (let j = 0; j < D; j++) {
+    means[j] /= N;
+  }
+  
+  const centered = data.map(row => row.map((val, j) => val - means[j]));
+  
+  const Cov = Array.from({ length: D }, () => Array(D).fill(0));
+  for (let i = 0; i < D; i++) {
+    for (let j = i; j < D; j++) {
+      let sum = 0;
+      for (let k = 0; k < N; k++) {
+        sum += centered[k][i] * centered[k][j];
+      }
+      const val = sum / (N - 1 || 1);
+      Cov[i][j] = val;
+      Cov[j][i] = val;
+    }
+  }
+  
+  const { eigenvalues, eigenvectors } = jacobiEigenvalue(Cov);
+  
+  const indexedEigenvalues = eigenvalues.map((val, idx) => ({ val: Math.abs(val), idx }));
+  indexedEigenvalues.sort((a, b) => b.val - a.val);
+  
+  const pc1Idx = indexedEigenvalues[0].idx;
+  const pc2Idx = indexedEigenvalues[1].idx;
+  
+  const pc1 = eigenvectors.map(row => row[pc1Idx]);
+  const pc2 = eigenvectors.map(row => row[pc2Idx]);
+  
+  return centered.map(row => {
+    let x = 0;
+    let y = 0;
+    for (let j = 0; j < D; j++) {
+      x += row[j] * pc1[j];
+      y += row[j] * pc2[j];
+    }
+    return { x, y };
+  });
+}
 
 const DashboardTab = React.memo(({
   connectionState,
@@ -38,6 +151,93 @@ const DashboardTab = React.memo(({
   renderedLogs,
   threatLevel
 }) => {
+  const [showPca, setShowPca] = useState(false);
+  const [embeddingHistory, setEmbeddingHistory] = useState([]);
+  const lastSeqIdRef = useRef(null);
+  const lastEmbStrRef = useRef(null);
+
+  // Accumulate embedding history up to 50 samples (only when PCA is toggled ON)
+  useEffect(() => {
+    if (!showPca) return; // Stop background accumulation completely when toggled OFF for zero performance overhead
+
+    if (currentPacket && currentPacket.motionEmbedding && currentPacket.motionEmbedding.length > 0) {
+      const embStr = JSON.stringify(currentPacket.motionEmbedding);
+      // Double check sequenceId and array values to avoid duplicates
+      if (currentPacket.sequenceId !== lastSeqIdRef.current || embStr !== lastEmbStrRef.current) {
+        lastSeqIdRef.current = currentPacket.sequenceId;
+        lastEmbStrRef.current = embStr;
+        
+        setEmbeddingHistory(prev => {
+          const next = [...prev, {
+            embedding: currentPacket.motionEmbedding,
+            motionState: currentPacket.motionState,
+            anomalyScore: currentPacket.anomalyScore,
+            id: Date.now() + Math.random().toString()
+          }];
+          if (next.length > 50) {
+            next.shift();
+          }
+          return next;
+        });
+      }
+    }
+  }, [currentPacket, showPca]);
+
+  // Clear history on disconnect or toggle off
+  useEffect(() => {
+    if (connectionState === 'DISCONNECTED') {
+      setEmbeddingHistory([]);
+      lastSeqIdRef.current = null;
+      lastEmbStrRef.current = null;
+    }
+  }, [connectionState]);
+
+  // Reset PCA history (Refresh)
+  const handleResetPca = () => {
+    setEmbeddingHistory([]);
+    lastSeqIdRef.current = null;
+    lastEmbStrRef.current = null;
+  };
+
+  // Compute PCA points whenever the history changes (only when PCA is toggled ON)
+  const pcaPoints = useMemo(() => {
+    if (!showPca || embeddingHistory.length < 20) return [];
+    try {
+      const data = embeddingHistory.map(h => h.embedding);
+      const projected = computePCA(data);
+      
+      let minX = Infinity, maxX = -Infinity;
+      let minY = Infinity, maxY = -Infinity;
+      projected.forEach(p => {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      });
+      
+      const rangeX = maxX - minX || 1e-4;
+      const rangeY = maxY - minY || 1e-4;
+      
+      return projected.map((p, idx) => {
+        const h = embeddingHistory[idx];
+        const scaledX = ((p.x - minX) / rangeX) * 180 + 40;
+        const scaledY = 160 - ((p.y - minY) / rangeY) * 120;
+        return {
+          id: h.id,
+          x: scaledX,
+          y: scaledY,
+          motionState: h.motionState,
+          anomalyScore: h.anomalyScore,
+          isNewest: idx === embeddingHistory.length - 1,
+          opacity: 0.15 + 0.85 * (idx / (embeddingHistory.length - 1 || 1)),
+        };
+      });
+    } catch (err) {
+      console.warn("PCA projection failed:", err);
+      return [];
+    }
+  }, [embeddingHistory, showPca]);
+
   return (
     <>
       {/* Header - Connection Panel */}
@@ -187,6 +387,160 @@ const DashboardTab = React.memo(({
             <Text style={{ color: '#64748B', fontSize: 10 }}>Freq: {currentPacket.dominantFreq?.toFixed(1) ?? '?'}Hz</Text>
           </View>
         </View>
+
+        {/* 16-Dimensional Motion Embedding Visualisation */}
+        {currentPacket.motionEmbedding && currentPacket.motionEmbedding.length > 0 && (
+          <View style={{
+            marginTop: 10,
+            padding: 8,
+            backgroundColor: 'rgba(255,255,255,0.02)',
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: 'rgba(255,255,255,0.05)'
+          }}>
+            <Text style={{ color: '#94A3B8', fontSize: 10, fontWeight: '700', marginBottom: 4 }}>🧬 Live Motion Embedding (16-dim):</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
+              {currentPacket.motionEmbedding.map((val, idx) => (
+                <View key={idx} style={{
+                  minWidth: 26,
+                  paddingVertical: 2,
+                  backgroundColor: 'rgba(16, 185, 129, 0.05)',
+                  borderRadius: 4,
+                  borderWidth: 1,
+                  borderColor: 'rgba(16, 185, 129, 0.2)',
+                  alignItems: 'center'
+                }}>
+                  <Text style={{ color: '#10B981', fontSize: 9, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', fontWeight: 'bold' }}>
+                    {val >= 0 ? `+${val.toFixed(2)}` : val.toFixed(2)}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+      </View>
+
+      {/* Standalone Card: PCA Space */}
+      <View style={styles.card}>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text style={styles.cardTitle}>🧬 Live Motion PCA Space</Text>
+          <TouchableOpacity 
+            onPress={() => setShowPca(!showPca)}
+            style={{ 
+              backgroundColor: 'rgba(255,255,255,0.06)', 
+              paddingHorizontal: 8, 
+              paddingVertical: 4, 
+              borderRadius: 6,
+              borderWidth: 1,
+              borderColor: 'rgba(255,255,255,0.1)'
+            }}
+          >
+            <Text style={{ color: '#E2E8F0', fontSize: 10, fontWeight: '700' }}>
+              {showPca ? 'Hide PCA Plot ✕' : 'Show PCA Plot 📊'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        
+        {showPca && (
+          <View style={{ marginTop: 12 }}>
+            {embeddingHistory.length < 20 ? (
+              <View style={{ paddingVertical: 20, alignItems: 'center' }}>
+                <ActivityIndicator size="small" color="#10B981" />
+                <Text style={{ color: '#94A3B8', fontSize: 11, marginTop: 8, textAlign: 'center' }}>
+                  Gathering motion embeddings...
+                </Text>
+                <Text style={{ color: '#64748B', fontSize: 10, marginTop: 2 }}>
+                  {embeddingHistory.length} / 20 samples minimum
+                </Text>
+                {/* Horizontal progress bar */}
+                <View style={{ width: '80%', height: 4, backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: 2, marginTop: 8, overflow: 'hidden' }}>
+                  <View style={{ width: `${(embeddingHistory.length / 20) * 100}%`, height: '100%', backgroundColor: '#10B981' }} />
+                </View>
+              </View>
+            ) : (
+              <View>
+                <View style={{ 
+                  backgroundColor: 'rgba(0,0,0,0.2)', 
+                  borderRadius: 10, 
+                  borderWidth: 1, 
+                  borderColor: 'rgba(255,255,255,0.05)',
+                  alignItems: 'center', 
+                  padding: 10 
+                }}>
+                  <Svg height="200" width="260">
+                    {/* Grid lines */}
+                    <Line x1="30" y1="30" x2="230" y2="30" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
+                    <Line x1="30" y1="100" x2="230" y2="100" stroke="rgba(255,255,255,0.05)" strokeWidth="1" strokeDasharray="4 4" />
+                    <Line x1="30" y1="170" x2="230" y2="170" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
+                    
+                    <Line x1="30" y1="30" x2="30" y2="170" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
+                    <Line x1="130" y1="30" x2="130" y2="170" stroke="rgba(255,255,255,0.05)" strokeWidth="1" strokeDasharray="4 4" />
+                    <Line x1="230" y1="30" x2="230" y2="170" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
+
+                    {/* Projected points */}
+                    {pcaPoints.map((pt) => {
+                      let color = '#10B981'; // default green
+                      if (pt.motionState & (1 << 0)) color = '#64748B'; // still
+                      else if (pt.motionState & (1 << 3)) color = '#EF4444'; // high-impact
+                      else if (pt.motionState & (1 << 1)) color = '#3B82F6'; // periodic
+                      else if (pt.motionState & (1 << 2)) color = '#F59E0B'; // aperiodic
+                      else if (pt.motionState & (1 << 4)) color = '#8B5CF6'; // restrained
+
+                      return (
+                        <Circle
+                          key={pt.id}
+                          cx={pt.x}
+                          cy={pt.y}
+                          r={pt.isNewest ? 7 : 4}
+                          fill={color}
+                          opacity={pt.opacity}
+                          stroke={pt.isNewest ? '#FFFFFF' : 'none'}
+                          strokeWidth={pt.isNewest ? 1.5 : 0}
+                        />
+                      );
+                    })}
+                  </Svg>
+                </View>
+                
+                {/* Legend & stats */}
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginTop: 10 }}>
+                  {[
+                    { label: 'Still', color: '#64748B' },
+                    { label: 'Periodic', color: '#3B82F6' },
+                    { label: 'Aperiodic', color: '#F59E0B' },
+                    { label: 'High-Impact', color: '#EF4444' },
+                    { label: 'Restrained', color: '#8B5CF6' }
+                  ].map(({ label, color }) => (
+                    <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color }} />
+                      <Text style={{ color: '#64748B', fontSize: 10 }}>{label}</Text>
+                    </View>
+                  ))}
+                </View>
+                
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
+                  <Text style={{ color: '#64748B', fontSize: 9 }}>
+                    Plotted: {embeddingHistory.length} / 50 samples (idle when hidden)
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: 10 }}>
+                    <TouchableOpacity 
+                      onPress={handleResetPca}
+                      style={{ padding: 4 }}
+                    >
+                      <Text style={{ color: '#3B82F6', fontSize: 10, fontWeight: '700' }}>🔄 Refresh</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity 
+                      onPress={handleResetPca}
+                      style={{ padding: 4 }}
+                    >
+                      <Text style={{ color: '#EF4444', fontSize: 10, fontWeight: '700' }}>🧹 Clear</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            )}
+          </View>
+        )}
       </View>
 
       {/* Threat Score Gauge Card */}

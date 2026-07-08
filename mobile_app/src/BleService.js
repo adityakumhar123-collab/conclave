@@ -86,12 +86,22 @@ export function parseIncomingPacket(bytes) {
   }
 }
 
+function dequantizeEmbedding(slice) {
+  const scale = 0.01250550;
+  const zeroPoint = -80;
+  return Array.from(slice).map(x => {
+    const int8Val = x > 127 ? x - 256 : x;
+    return (int8Val - zeroPoint) * scale;
+  });
+}
+
 function parseFeaturePacket(bytes) {
-  if (bytes.length < 16) return null;
+  if (bytes.length < 32) return null;
 
   const eigenvalueRatio = bytes[7] | (bytes[8] << 8);
   const peakAccel = bytes[10] | (bytes[11] << 8);
   const anomalyDuration = bytes[12] | (bytes[13] << 8);
+  const motionEmbedding = dequantizeEmbedding(bytes.slice(14, 30));
 
   return {
     type: 'FEATURE',
@@ -105,11 +115,12 @@ function parseFeaturePacket(bytes) {
     wearConfidence: bytes[9],
     peakAccel, // mg
     anomalyDuration, // units of 100ms
+    motionEmbedding,
   };
 }
 
 function parseEventPacket(bytes) {
-  if (bytes.length < 18) return null;
+  if (bytes.length < 34) return null;
   
   // Bytes 2-3: Timestamp (uint16 little endian)
   const timestamp = bytes[2] | (bytes[3] << 8);
@@ -117,6 +128,7 @@ function parseEventPacket(bytes) {
   const peakAccel = bytes[8] | (bytes[9] << 8);
   // Bytes 13-14: Eigenvalue ratio (uint16 little-endian, scaled x1000)
   const eigenvalueRatio = bytes[13] | (bytes[14] << 8);
+  const motionEmbedding = dequantizeEmbedding(bytes.slice(17, 33));
 
   return {
     type: 'EVENT',
@@ -133,6 +145,7 @@ function parseEventPacket(bytes) {
     eigenvalueRatio,              // 0 - 1000
     battery: bytes[15],           // %
     wearConfidence: bytes[16],    // %
+    motionEmbedding,
   };
 }
 
