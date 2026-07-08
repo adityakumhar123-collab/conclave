@@ -31,7 +31,7 @@
 // ==========================================
 // Anomaly Detection Constants
 // ==========================================
-#define DEFAULT_THRESHOLD 1.008393f // Calculated threshold (mu + 3*sigma)
+#define DEFAULT_THRESHOLD 1.01647f // Calculated threshold (mu + 3*sigma) for Model v2 20-epoch
 #define HYSTERESIS_WINDOWS 3 // Must exceed threshold for this many windows
 
 // ==========================================

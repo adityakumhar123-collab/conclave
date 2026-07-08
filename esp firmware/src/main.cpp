@@ -34,8 +34,11 @@ void HeartbeatTask(void* pvParameters);
 
 void setup() {
     Serial.begin(115200);
-    // Wait for serial to initialize on USB boards
-    delay(1000);
+    // Wait up to 4 seconds for Serial connection on USB boards
+    unsigned long start_time = millis();
+    while (!Serial && (millis() - start_time < 4000)) {
+        delay(10);
+    }
     Serial.println("\n===========================================");
     Serial.println("         SafeBand Firmware Starting        ");
     Serial.println("===========================================");
@@ -58,6 +61,9 @@ void setup() {
 
     // 4. Initialize BLE Stack
     BLEManager::getInstance().begin();
+    if (!(systemFlags & (1 << 3))) {
+        BLEManager::getInstance().setDeviceInfo(ModelRunner::getInstance().getLastError());
+    }
     systemFlags |= (1 << 1); // Set BLE OK
 
     // 5. Create FreeRTOS Queue (capacity: 100 samples)
@@ -226,7 +232,8 @@ void ProcessingTask(void* pvParameters) {
                 }
 
                 // Run anomaly detection inference
-                float anomalyScore = ModelRunner::getInstance().runInference(features);
+                int8_t motionEmbedding[16] = {0};
+                float anomalyScore = ModelRunner::getInstance().runInference(features, motionEmbedding);
                 currentAnomalyScore = anomalyScore;
 
                 // Accumulate statistics for the 30s heartbeat average
@@ -255,6 +262,10 @@ void ProcessingTask(void* pvParameters) {
                     motionState |= (1 << 4); // Restrained
                 }
 
+                if (ModelRunner::getInstance().isTensorsAllocated()) {
+                    motionState |= (1 << 7); // Bit 7: Model Allocated successfully
+                }
+
                 uint8_t scaledScore = static_cast<uint8_t>(fminf((anomalyScore / DEFAULT_THRESHOLD) * 128.0f, 255.0f));
 
                 // Send live 2 Hz feature stream to the mobile app for dynamic gauges
@@ -269,7 +280,8 @@ void ProcessingTask(void* pvParameters) {
                         static_cast<uint16_t>(features[1323] * 1000.0f), // Eigenvalue linearity ratio
                         g_wearConfidence,
                         static_cast<uint16_t>(features[1212] * 1.5f * 101.97162f), // Peak accel proxy (Resultant RMS)
-                        static_cast<uint16_t>(consecutiveAnomalyWindows * 5) // Duration in 100ms units
+                        static_cast<uint16_t>(consecutiveAnomalyWindows * 5), // Duration in 100ms units
+                        motionEmbedding
                     );
                 }
 
@@ -304,7 +316,8 @@ void ProcessingTask(void* pvParameters) {
                                 static_cast<uint8_t>(features[1284] * 255.0f), // Spectral Entropy Ax
                                 static_cast<uint16_t>(features[1323] * 1000.0f), // Eigenvalue linearity ratio
                                 battery,
-                                g_wearConfidence
+                                g_wearConfidence,
+                                motionEmbedding
                             );
                         }
                     }

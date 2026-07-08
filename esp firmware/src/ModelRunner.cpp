@@ -3,8 +3,8 @@
 #include "IMUSensor.h"
 #include "model_data.h"
 #include "scaling_params.h"
-#include "tensorflow/lite/micro/tflite_bridge/micro_error_reporter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/micro/tflite_bridge/micro_error_reporter.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
@@ -83,11 +83,48 @@ TfLiteStatus TileParse(const tflite::Operator* op, tflite::ErrorReporter* error_
   return kTfLiteOk;
 }
 
+TfLiteStatus ReduceProdPrepare(TfLiteContext* context, TfLiteNode* node) {
+  TF_LITE_ENSURE_EQ(context, node->inputs->size, 2);
+  TF_LITE_ENSURE_EQ(context, node->outputs->size, 1);
+  return kTfLiteOk;
+}
+
+TfLiteStatus ReduceProdInvoke(TfLiteContext* context, TfLiteNode* node) {
+  const TfLiteTensor* input = tflite::GetInput(context, node, 0);
+  TfLiteTensor* output = tflite::GetOutput(context, node, 0);
+
+  TF_LITE_ENSURE_EQ(context, input->type, kTfLiteInt32);
+  TF_LITE_ENSURE_EQ(context, output->type, kTfLiteInt32);
+
+  int32_t prod = 1;
+  int num_elements = 1;
+  for (int i = 0; i < input->dims->size; i++) {
+    num_elements *= input->dims->data[i];
+  }
+
+  const int32_t* input_data = input->data.i32;
+  for (int i = 0; i < num_elements; i++) {
+    prod *= input_data[i];
+  }
+
+  output->data.i32[0] = prod;
+  return kTfLiteOk;
+}
+
+TfLiteStatus ReduceProdParse(const tflite::Operator* op, tflite::ErrorReporter* error_reporter,
+                             tflite::BuiltinDataAllocator* allocator, void** builtin_data) {
+  *builtin_data = nullptr;
+  return kTfLiteOk;
+}
+
 class SafeBandOpResolver : public tflite::MicroMutableOpResolver<40> {
  public:
   const TFLMRegistration* FindOp(tflite::BuiltinOperator op) const override {
     if (op == tflite::BuiltinOperator_TILE) {
       return GetTileRegistration();
+    }
+    if (op == tflite::BuiltinOperator_REDUCE_PROD) {
+      return GetReduceProdRegistration();
     }
     return tflite::MicroMutableOpResolver<40>::FindOp(op);
   }
@@ -96,6 +133,9 @@ class SafeBandOpResolver : public tflite::MicroMutableOpResolver<40> {
       tflite::BuiltinOperator op) const override {
     if (op == tflite::BuiltinOperator_TILE) {
       return TileParse;
+    }
+    if (op == tflite::BuiltinOperator_REDUCE_PROD) {
+      return ReduceProdParse;
     }
     return tflite::MicroMutableOpResolver<40>::GetOpDataParser(op);
   }
@@ -113,10 +153,24 @@ class SafeBandOpResolver : public tflite::MicroMutableOpResolver<40> {
     };
     return &r;
   }
+
+  static const TFLMRegistration* GetReduceProdRegistration() {
+    static TFLMRegistration r = {
+        .init = nullptr,
+        .free = nullptr,
+        .prepare = ReduceProdPrepare,
+        .invoke = ReduceProdInvoke,
+        .reset = nullptr,
+        .builtin_code = tflite::BuiltinOperator_REDUCE_PROD,
+        .custom_name = nullptr
+    };
+    return &r;
+  }
 };
 } // namespace
 
-constexpr int kArenaSize = 180 * 1024; // Increased from 120 KB to 180 KB
+alignas(16) static uint8_t static_tensor_arena[140 * 1024];
+constexpr int kArenaSize = 140 * 1024;
 
 ModelRunner& ModelRunner::getInstance() {
     static ModelRunner instance;
@@ -125,25 +179,20 @@ ModelRunner& ModelRunner::getInstance() {
 
 ModelRunner::ModelRunner() 
     : testAlertActive(false)
+    , tensorsAllocated(false)
     , interpreter(nullptr)
     , model(nullptr)
     , raw_arena(nullptr)
     , tensor_arena(nullptr) {}
 
+extern "C" char g_last_tflm_error[256];
+
 bool ModelRunner::begin() {
+    g_last_tflm_error[0] = '\0';
     Serial.println("[Model] Initializing TensorFlow Lite Micro...");
 
-    // Allocate 16-byte aligned tensor arena on heap/PSRAM to save internal DRAM
-    raw_arena = (uint8_t*)heap_caps_malloc(kArenaSize + 16, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-    if (raw_arena == nullptr) {
-        Serial.println("[Model] Warning: Failed to allocate arena in internal RAM. Trying PSRAM...");
-        raw_arena = (uint8_t*)heap_caps_malloc(kArenaSize + 16, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
-        if (raw_arena == nullptr) {
-            Serial.println("[Model] Error: Failed to allocate tensor arena!");
-            return false;
-        }
-    }
-    tensor_arena = (uint8_t*)(((uintptr_t)raw_arena + 15) & ~15);
+    raw_arena = nullptr;
+    tensor_arena = static_tensor_arena;
 
     // 1. Get model pointer from C array in model_data.h
     model = (void*)tflite::GetModel(g_model_data);
@@ -159,6 +208,7 @@ bool ModelRunner::begin() {
     static SafeBandOpResolver resolver;
     resolver.AddExpandDims();
     resolver.AddConv2D();
+    resolver.AddDepthwiseConv2D();
     resolver.AddReshape();
     resolver.AddMaxPool2D();
     resolver.AddShape();
@@ -170,17 +220,24 @@ bool ModelRunner::begin() {
     resolver.AddUnpack();
     resolver.AddAdd();
     resolver.AddSplit();
+    resolver.AddSplitV();
     resolver.AddLogistic();
     resolver.AddMul();
     resolver.AddTanh();
     resolver.AddConcatenation();
     resolver.AddTransposeConv();
     resolver.AddSqueeze();
+    resolver.AddSub();
+    resolver.AddQuantize();
+    resolver.AddDequantize();
+    resolver.AddL2Normalization();
+    resolver.AddAbs();
+    resolver.AddMean();
+    resolver.AddReduceMax();
+    resolver.AddGather();
 
-    // 3. Set up interpreter
-    Serial.println("[Model] Setting up MicroInterpreter...");
     static tflite::MicroInterpreter static_interpreter(
-        (const tflite::Model*)model, resolver, tensor_arena, kArenaSize);
+        (const tflite::Model*)model, resolver, static_tensor_arena, kArenaSize);
     interpreter = &static_interpreter;
 
     // 4. Allocate tensors
@@ -188,15 +245,20 @@ bool ModelRunner::begin() {
     TfLiteStatus allocate_status = static_interpreter.AllocateTensors();
     if (allocate_status != kTfLiteOk) {
         Serial.println("[Model] Error: AllocateTensors() failed.");
+        tensorsAllocated = false;
         return false;
     }
 
+    tensorsAllocated = true;
     Serial.println("[Model] TensorFlow Lite Micro interpreter initialized successfully!");
     return true;
 }
 
-float ModelRunner::runInference(const float* featureVector) {
+float ModelRunner::runInference(const float* featureVector, int8_t* out_embedding) {
     if (testAlertActive) {
+        if (out_embedding != nullptr) {
+            memset(out_embedding, 0x2A, 16); // Mock embedding pattern
+        }
         return 0.95f;
     }
 
@@ -204,11 +266,17 @@ float ModelRunner::runInference(const float* featureVector) {
 #if USE_MOCK_IMU
     MockMotionState state = IMUSensor::getInstance().getMockState();
     if (state == MOCK_MOTION_STRUGGLE) {
+        if (out_embedding != nullptr) {
+            memset(out_embedding, 0x1F, 16); // Mock struggle embedding
+        }
         return 0.85f;
     } else if (state == MOCK_MOTION_FALL) {
         // Fall simulation: high variance initially, then high anomalies
         float totalVariance = featureVector[1320 + 5]; // Trace of covariance at index 1320 + 5 = 1325
         float peakJerk = featureVector[9 * 132 + 78];  // Jerk in the last subwindow
+        if (out_embedding != nullptr) {
+            memset(out_embedding, 0x3F, 16); // Mock fall embedding
+        }
         if (totalVariance > 45000.0f || (totalVariance < 2.5f && peakJerk > 20.0f)) {
             return 0.90f;
         }
@@ -216,7 +284,10 @@ float ModelRunner::runInference(const float* featureVector) {
     }
 #endif
 
-    if (interpreter == nullptr) {
+    if (!tensorsAllocated || interpreter == nullptr) {
+        if (out_embedding != nullptr) {
+            memset(out_embedding, 0, 16);
+        }
         return 0.0f;
     }
 
@@ -261,53 +332,51 @@ float ModelRunner::runInference(const float* featureVector) {
     TfLiteStatus invoke_status = interp->Invoke();
     if (invoke_status != kTfLiteOk) {
         Serial.println("[Model] Error: Invoke() failed!");
+        if (out_embedding != nullptr) {
+            memset(out_embedding, 0, 16);
+        }
         return 0.5f; // Fallback score
     }
 
-    // 5. Read output tensors and compute reconstruction Mean Absolute Error (MAE)
-    TfLiteTensor* output_seq = interp->output(0);
-    TfLiteTensor* output_glob = interp->output(1);
+    // 5. Robust Output Querying (shape-based matching)
+    TfLiteTensor* emb_tensor = nullptr;
+    TfLiteTensor* err_tensor = nullptr;
 
-    // Sequence output (shape: [1, 1, 132]) is compared with the last timestep of the input (timestep 9)
-    // NOTE: TFLite model only produces 1 reconstructed timestep, not 10.
-    float scale_out_seq = output_seq->params.scale;
-    int32_t zp_out_seq = output_seq->params.zero_point;
-    const int8_t* out_seq_data = output_seq->data.int8;
-
-    float total_seq_mae = 0.0f;
-    constexpr int kLastTimestepOffset = 9 * 132;
-    for (int i = 0; i < 132; i++) {
-        float reconstructed_val = scale_out_seq * (out_seq_data[i] - zp_out_seq);
-        float raw_val = featureVector[kLastTimestepOffset + i];
-        float original_norm_val = (raw_val - SEQ_MEAN[i]) / (SEQ_STD[i] > 1e-6f ? SEQ_STD[i] : 1e-6f);
-        total_seq_mae += fabsf(original_norm_val - reconstructed_val);
+    for (int i = 0; i < interp->outputs_size(); ++i) {
+        TfLiteTensor* out = interp->output(i);
+        if (out->dims->size == 2) {
+            if (out->dims->data[1] == 16) {
+                emb_tensor = out;
+            } else if (out->dims->data[1] == 1) {
+                err_tensor = out;
+            }
+        }
     }
-    float seq_mae = total_seq_mae / 132.0f;
 
-    // Global output (shape: [1, 12]) is compared with the global input
-    float scale_out_glob = output_glob->params.scale;
-    int32_t zp_out_glob = output_glob->params.zero_point;
-    const int8_t* out_glob_data = output_glob->data.int8;
-
-    float total_glob_mae = 0.0f;
-    for (int i = 0; i < 12; i++) {
-        float reconstructed_val = scale_out_glob * (out_glob_data[i] - zp_out_glob);
-        float raw_val = featureVector[1320 + i];
-        float original_norm_val = (raw_val - GLOB_MEAN[i]) / (GLOB_STD[i] > 1e-6f ? GLOB_STD[i] : 1e-6f);
-        total_glob_mae += fabsf(original_norm_val - reconstructed_val);
+    // 6. Copy embedding and dequantize reconstruction error
+    if (emb_tensor != nullptr && out_embedding != nullptr) {
+        memcpy(out_embedding, emb_tensor->data.int8, 16);
+    } else if (out_embedding != nullptr) {
+        memset(out_embedding, 0, 16);
     }
-    float glob_mae = total_glob_mae / 12.0f;
 
-    // Combine: weighted average over 144 total features (132 seq + 12 glob)
-    // This keeps the combined score in the same range as the calibrated threshold.
-    float combined_mae = (total_seq_mae + total_glob_mae) / 144.0f;
+    float recon_error = 0.0f;
+    if (err_tensor != nullptr) {
+        float err_scale = err_tensor->params.scale;
+        int32_t err_zp = err_tensor->params.zero_point;
+        recon_error = (static_cast<float>(err_tensor->data.int8[0]) - err_zp) * err_scale;
+    }
 
-    // The raw combined MAE is returned as the anomaly score, to be compared
-    // with DEFAULT_THRESHOLD (1.008393f) in the firmware.
-    return combined_mae;
+    return recon_error;
 }
 
 void ModelRunner::setTestAlert(bool active) {
     testAlertActive = active;
     Serial.printf("[Model] Test Alert override: %s\n", active ? "ACTIVE" : "INACTIVE");
+}
+
+extern "C" char g_last_tflm_error[256] = "";
+
+const char* ModelRunner::getLastError() const {
+    return g_last_tflm_error;
 }

@@ -16,18 +16,19 @@ public:
 
     // Initialize BLE Server, Services, and Characteristics
     void begin();
+    void setDeviceInfo(const char* info);
 
     // Send Status Packet (Type 0x02)
     void sendStatusPacket(uint8_t batteryPct, uint8_t wearConfidence, uint8_t systemFlags, uint16_t uptimeMinutes, uint8_t avgAnomaly, uint8_t inferenceRate);
 
     // Send Event Packet (Type 0x01)
-    void sendEventPacket(uint16_t secSinceBoot, uint8_t anomalyScore, uint8_t confidence, uint8_t motionState, uint8_t duration100ms, uint16_t peakResultantAccelMg, uint8_t dominantFreqHz, uint8_t zcr, uint8_t spectralEntropy, uint16_t eigenvalueRatioScaled, uint8_t batteryPct, uint8_t wearConfidence);
+    void sendEventPacket(uint16_t secSinceBoot, uint8_t anomalyScore, uint8_t confidence, uint8_t motionState, uint8_t duration100ms, uint16_t peakResultantAccelMg, uint8_t dominantFreqHz, uint8_t zcr, uint8_t spectralEntropy, uint16_t eigenvalueRatioScaled, uint8_t batteryPct, uint8_t wearConfidence, const int8_t* motionEmbedding);
 
     // Send Sensor Packet (Type 0x03)
     void sendSensorPacket(uint16_t msSinceBoot, const IMUData& imu, float resultantAccel, float jerk, uint8_t anomalyScore);
 
     // Send Feature Packet (Type 0x04)
-    void sendFeaturePacket(uint8_t seq, uint8_t anomalyScore, uint8_t motionState, uint8_t dominantFreqHz, uint8_t zcr, uint8_t spectralEntropy, uint16_t eigenvalueRatioScaled, uint8_t wearConfidence, uint16_t peakResultantAccelMg, uint16_t durationUnits);
+    void sendFeaturePacket(uint8_t seq, uint8_t anomalyScore, uint8_t motionState, uint8_t dominantFreqHz, uint8_t zcr, uint8_t spectralEntropy, uint16_t eigenvalueRatioScaled, uint8_t wearConfidence, uint16_t peakResultantAccelMg, uint16_t durationUnits, const int8_t* motionEmbedding);
 
     // Handle connection changes in main thread if needed
     void handleConnectionStatus();

@@ -135,6 +135,12 @@ void BLEManager::begin() {
     Serial.println("[BLE] Service started. Advertising active.");
 }
 
+void BLEManager::setDeviceInfo(const char* info) {
+    if (pCharDeviceInfo != nullptr && info != nullptr && strlen(info) > 0) {
+        pCharDeviceInfo->setValue(info);
+    }
+}
+
 void BLEManager::sendStatusPacket(uint8_t batteryPct, uint8_t wearConfidence, uint8_t systemFlags, uint16_t uptimeMinutes, uint8_t avgAnomaly, uint8_t inferenceRate) {
     if (!deviceConnected) return;
 
@@ -159,10 +165,10 @@ void BLEManager::sendStatusPacket(uint8_t batteryPct, uint8_t wearConfidence, ui
     pCharStatus->notify();
 }
 
-void BLEManager::sendEventPacket(uint16_t secSinceBoot, uint8_t anomalyScore, uint8_t confidence, uint8_t motionState, uint8_t duration100ms, uint16_t peakResultantAccelMg, uint8_t dominantFreqHz, uint8_t zcr, uint8_t spectralEntropy, uint16_t eigenvalueRatioScaled, uint8_t batteryPct, uint8_t wearConfidence) {
+void BLEManager::sendEventPacket(uint16_t secSinceBoot, uint8_t anomalyScore, uint8_t confidence, uint8_t motionState, uint8_t duration100ms, uint16_t peakResultantAccelMg, uint8_t dominantFreqHz, uint8_t zcr, uint8_t spectralEntropy, uint16_t eigenvalueRatioScaled, uint8_t batteryPct, uint8_t wearConfidence, const int8_t* motionEmbedding) {
     if (!deviceConnected) return;
 
-    uint8_t packet[18];
+    uint8_t packet[34];
     packet[0] = 0x01; // Packet Type
     packet[1] = eventSequenceId++;
     
@@ -190,10 +196,17 @@ void BLEManager::sendEventPacket(uint16_t secSinceBoot, uint8_t anomalyScore, ui
     packet[15] = batteryPct;
     packet[16] = wearConfidence;
     
+    // Copy the 16-byte motion embedding
+    if (motionEmbedding != nullptr) {
+        memcpy(&packet[17], motionEmbedding, 16);
+    } else {
+        memset(&packet[17], 0, 16);
+    }
+    
     // Checksum
-    packet[17] = calculateChecksum(packet, 17);
+    packet[33] = calculateChecksum(packet, 33);
 
-    pCharEvent->setValue(packet, 18);
+    pCharEvent->setValue(packet, 34);
     pCharEvent->notify();
 }
 
@@ -252,10 +265,10 @@ void BLEManager::sendSensorPacket(uint16_t msSinceBoot, const IMUData& imu, floa
     pCharSensor->notify();
 }
 
-void BLEManager::sendFeaturePacket(uint8_t seq, uint8_t anomalyScore, uint8_t motionState, uint8_t dominantFreqHz, uint8_t zcr, uint8_t spectralEntropy, uint16_t eigenvalueRatioScaled, uint8_t wearConfidence, uint16_t peakResultantAccelMg, uint16_t durationUnits) {
+void BLEManager::sendFeaturePacket(uint8_t seq, uint8_t anomalyScore, uint8_t motionState, uint8_t dominantFreqHz, uint8_t zcr, uint8_t spectralEntropy, uint16_t eigenvalueRatioScaled, uint8_t wearConfidence, uint16_t peakResultantAccelMg, uint16_t durationUnits, const int8_t* motionEmbedding) {
     if (!deviceConnected) return;
 
-    uint8_t packet[16];
+    uint8_t packet[32];
     packet[0] = 0x04; // Packet Type
     packet[1] = featureSequenceId++;
     packet[2] = anomalyScore;
@@ -278,12 +291,19 @@ void BLEManager::sendFeaturePacket(uint8_t seq, uint8_t anomalyScore, uint8_t mo
     packet[12] = static_cast<uint8_t>(durationUnits & 0xFF);
     packet[13] = static_cast<uint8_t>((durationUnits >> 8) & 0xFF);
     
-    packet[14] = 0x00; // Reserved
+    // Copy the 16-byte motion embedding
+    if (motionEmbedding != nullptr) {
+        memcpy(&packet[14], motionEmbedding, 16);
+    } else {
+        memset(&packet[14], 0, 16);
+    }
+    
+    packet[30] = 0x00; // Reserved
     
     // Checksum
-    packet[15] = calculateChecksum(packet, 15);
+    packet[31] = calculateChecksum(packet, 31);
 
-    pCharFeature->setValue(packet, 16);
+    pCharFeature->setValue(packet, 32);
     pCharFeature->notify();
 }
 

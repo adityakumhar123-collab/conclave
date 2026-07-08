@@ -10,13 +10,16 @@ public:
     // Initialize model (e.g. load TFLite micro model, verify model footprint)
     bool begin();
 
-    // Run inference on the 144-dimensional feature vector.
-    // Returns the reconstruction error (anomaly score) in range [0.0, 1.0].
-    float runInference(const float* featureVector);
+    // Run inference on the feature vector.
+    // Returns the reconstruction error (anomaly score).
+    // Writes the 16-dimensional motion fingerprint to out_embedding.
+    float runInference(const float* featureVector, int8_t* out_embedding);
 
     // Force a test alert anomaly score
     void setTestAlert(bool active);
     bool isTestAlertActive() const { return testAlertActive; }
+    bool isTensorsAllocated() const { return tensorsAllocated; }
+    const char* getLastError() const;
 
 private:
     ModelRunner();
@@ -26,6 +29,7 @@ private:
     ModelRunner& operator=(const ModelRunner&) = delete;
 
     bool testAlertActive;
+    bool tensorsAllocated;
     void* interpreter; // Opaque pointer to tflite::MicroInterpreter
     void* model;       // Opaque pointer to tflite::Model
     uint8_t* raw_arena;
