@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, ScrollView, Platform } from 'react-native';
 import Svg, { Circle, Line } from 'react-native-svg';
 import styles from './styles';
+import { LocationEngine } from '../LocationEngine';
 
 // Jacobi eigenvalue algorithm for symmetric matrix (Covariance matrix)
 function jacobiEigenvalue(A, maxIter = 50) {
@@ -9,9 +10,9 @@ function jacobiEigenvalue(A, maxIter = 50) {
   const V = Array.from({ length: n }, (_, i) =>
     Array.from({ length: n }, (_, j) => (i === j ? 1 : 0))
   );
-  
+
   const mat = A.map(row => [...row]);
-  
+
   for (let iter = 0; iter < maxIter; iter++) {
     let p = 0;
     let q = 1;
@@ -25,22 +26,22 @@ function jacobiEigenvalue(A, maxIter = 50) {
         }
       }
     }
-    
+
     if (maxVal < 1e-6) break;
-    
+
     const ap = mat[p][p];
     const aq = mat[q][q];
     const apq = mat[p][q];
-    
+
     const theta = 0.5 * Math.atan2(2 * apq, aq - ap);
     const c = Math.cos(theta);
     const s = Math.sin(theta);
-    
+
     mat[p][p] = c * c * ap - 2 * s * c * apq + s * s * aq;
     mat[q][q] = s * s * ap + 2 * s * c * apq + c * c * aq;
     mat[p][q] = 0;
     mat[q][p] = 0;
-    
+
     for (let i = 0; i < n; i++) {
       if (i !== p && i !== q) {
         const aip = mat[i][p];
@@ -51,7 +52,7 @@ function jacobiEigenvalue(A, maxIter = 50) {
         mat[q][i] = mat[i][q];
       }
     }
-    
+
     for (let i = 0; i < n; i++) {
       const vip = V[i][p];
       const viq = V[i][q];
@@ -59,7 +60,7 @@ function jacobiEigenvalue(A, maxIter = 50) {
       V[i][q] = s * vip + c * viq;
     }
   }
-  
+
   const eigenvalues = mat.map((row, i) => row[i]);
   return { eigenvalues, eigenvectors: V };
 }
@@ -68,7 +69,7 @@ function jacobiEigenvalue(A, maxIter = 50) {
 function computePCA(data) {
   const N = data.length;
   const D = data[0].length;
-  
+
   const means = Array(D).fill(0);
   for (let i = 0; i < N; i++) {
     for (let j = 0; j < D; j++) {
@@ -78,9 +79,9 @@ function computePCA(data) {
   for (let j = 0; j < D; j++) {
     means[j] /= N;
   }
-  
+
   const centered = data.map(row => row.map((val, j) => val - means[j]));
-  
+
   const Cov = Array.from({ length: D }, () => Array(D).fill(0));
   for (let i = 0; i < D; i++) {
     for (let j = i; j < D; j++) {
@@ -93,18 +94,18 @@ function computePCA(data) {
       Cov[j][i] = val;
     }
   }
-  
+
   const { eigenvalues, eigenvectors } = jacobiEigenvalue(Cov);
-  
+
   const indexedEigenvalues = eigenvalues.map((val, idx) => ({ val: Math.abs(val), idx }));
   indexedEigenvalues.sort((a, b) => b.val - a.val);
-  
+
   const pc1Idx = indexedEigenvalues[0].idx;
   const pc2Idx = indexedEigenvalues[1].idx;
-  
+
   const pc1 = eigenvectors.map(row => row[pc1Idx]);
   const pc2 = eigenvectors.map(row => row[pc2Idx]);
-  
+
   return centered.map(row => {
     let x = 0;
     let y = 0;
@@ -125,12 +126,6 @@ const DashboardTab = React.memo(({
   threatScore,
   cooldownActive,
   cooldownTime,
-  location,
-  setLocation,
-  timeOfDay,
-  setTimeOfDay,
-  postAnomalyStillness,
-  setPostAnomalyStillness,
   isStreaming,
   toggleStreaming,
   renderedGraph,
@@ -149,7 +144,10 @@ const DashboardTab = React.memo(({
   handleFilterChange,
   logsHistoryRef,
   renderedLogs,
-  threatLevel
+  threatLevel,
+  famLevel1 = 1.0,
+  famLevel2 = 1.0,
+  famFinal = 1.0
 }) => {
   const [showPca, setShowPca] = useState(false);
   const [embeddingHistory, setEmbeddingHistory] = useState([]);
@@ -166,7 +164,7 @@ const DashboardTab = React.memo(({
       if (currentPacket.sequenceId !== lastSeqIdRef.current || embStr !== lastEmbStrRef.current) {
         lastSeqIdRef.current = currentPacket.sequenceId;
         lastEmbStrRef.current = embStr;
-        
+
         setEmbeddingHistory(prev => {
           const next = [...prev, {
             embedding: currentPacket.motionEmbedding,
@@ -205,7 +203,7 @@ const DashboardTab = React.memo(({
     try {
       const data = embeddingHistory.map(h => h.embedding);
       const projected = computePCA(data);
-      
+
       let minX = Infinity, maxX = -Infinity;
       let minY = Infinity, maxY = -Infinity;
       projected.forEach(p => {
@@ -214,10 +212,10 @@ const DashboardTab = React.memo(({
         if (p.y < minY) minY = p.y;
         if (p.y > maxY) maxY = p.y;
       });
-      
+
       const rangeX = maxX - minX || 1e-4;
       const rangeY = maxY - minY || 1e-4;
-      
+
       return projected.map((p, idx) => {
         const h = embeddingHistory[idx];
         const scaledX = ((p.x - minX) / rangeX) * 180 + 40;
@@ -245,11 +243,11 @@ const DashboardTab = React.memo(({
         <View>
           <Text style={styles.subtext}>SafeBand Connection</Text>
           <View style={styles.row}>
-            <View style={[styles.statusRing, { 
-              backgroundColor: 
-                connectionState === 'DISCONNECTED' ? '#EF4444' : 
-                connectionState === 'SCANNING' || connectionState === 'CONNECTING' ? '#F59E0B' : 
-                '#10B981' 
+            <View style={[styles.statusRing, {
+              backgroundColor:
+                connectionState === 'DISCONNECTED' ? '#EF4444' :
+                  connectionState === 'SCANNING' || connectionState === 'CONNECTING' ? '#F59E0B' :
+                    '#10B981'
             }]} />
             <Text style={styles.titleText}>{connectionState}</Text>
           </View>
@@ -281,7 +279,7 @@ const DashboardTab = React.memo(({
               <ActivityIndicator size="small" color="#3B82F6" style={{ marginRight: 8 }} />
               <Text style={styles.scanningLabel}>Scanning for active BLE peripherals...</Text>
             </View>
-            
+
             {devices.length === 0 ? (
               <Text style={styles.noDevicesText}>No devices found yet. Verify device is advertising.</Text>
             ) : (
@@ -341,33 +339,33 @@ const DashboardTab = React.memo(({
           <View style={{ height: 22, backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: 11, overflow: 'hidden' }}>
             <View style={{
               height: 22,
-              width: `${Math.min((currentPacket.anomalyScore / 255) * 100, 100)}%`,
+              width: `${Math.min((currentPacket.anomalyScore / 1.1214) * 100, 100)}%`,
               borderRadius: 11,
               backgroundColor:
-                currentPacket.anomalyScore > 180 ? '#B91C1C' :
-                currentPacket.anomalyScore > 128 ? '#EF4444' :
-                currentPacket.anomalyScore > 80  ? '#F59E0B' : '#10B981',
+                currentPacket.anomalyScore > 1.10 ? '#B91C1C' :
+                  currentPacket.anomalyScore > 1.013 ? '#EF4444' :
+                    currentPacket.anomalyScore > 0.60 ? '#F59E0B' : '#10B981',
             }} />
-            {/* Threshold marker at 128/255 = 50.2% */}
-            <View style={{ position: 'absolute', left: '50%', top: 0, width: 2, height: 22, backgroundColor: '#FFFFFF', opacity: 0.6 }} />
+            {/* Threshold marker at 1.01309 / 1.1214 = 90.3% */}
+            <View style={{ position: 'absolute', left: '90.3%', top: 0, width: 2, height: 22, backgroundColor: '#FFFFFF', opacity: 0.6 }} />
           </View>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
-            <Text style={{ color: '#64748B', fontSize: 10 }}>0 (Normal)</Text>
+            <Text style={{ color: '#64748B', fontSize: 10 }}>0.000 (Normal)</Text>
             <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: 'bold' }}>
-              {currentPacket.anomalyScore} / 255
-              {currentPacket.anomalyScore > 128 ? ' ⚠️ FLAGGED' : ' ✓ Normal'}
+              {currentPacket.anomalyScore.toFixed(4)} / 1.1214
+              {currentPacket.anomalyScore > 1.01309 ? ' ⚠️ FLAGGED' : ' ✓ Normal'}
             </Text>
-            <Text style={{ color: '#64748B', fontSize: 10 }}>255 (Max)</Text>
+            <Text style={{ color: '#64748B', fontSize: 10 }}>1.1214 (Max)</Text>
           </View>
         </View>
         {/* Motion state badge row */}
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
           {[
-            { bit: 0, label: 'STILL',       color: '#64748B' },
-            { bit: 1, label: 'PERIODIC',    color: '#3B82F6' },
-            { bit: 2, label: 'APERIODIC',   color: '#F59E0B' },
+            { bit: 0, label: 'STILL', color: '#64748B' },
+            { bit: 1, label: 'PERIODIC', color: '#3B82F6' },
+            { bit: 2, label: 'APERIODIC', color: '#F59E0B' },
             { bit: 3, label: 'HIGH-IMPACT', color: '#EF4444' },
-            { bit: 4, label: 'RESTRAINED',  color: '#8B5CF6' },
+            { bit: 4, label: 'RESTRAINED', color: '#8B5CF6' },
           ].map(({ bit, label, color }) => {
             const active = (currentPacket.motionState & (1 << bit)) !== 0;
             return (
@@ -424,12 +422,12 @@ const DashboardTab = React.memo(({
       <View style={styles.card}>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <Text style={styles.cardTitle}>🧬 Live Motion PCA Space</Text>
-          <TouchableOpacity 
+          <TouchableOpacity
             onPress={() => setShowPca(!showPca)}
-            style={{ 
-              backgroundColor: 'rgba(255,255,255,0.06)', 
-              paddingHorizontal: 8, 
-              paddingVertical: 4, 
+            style={{
+              backgroundColor: 'rgba(255,255,255,0.06)',
+              paddingHorizontal: 8,
+              paddingVertical: 4,
               borderRadius: 6,
               borderWidth: 1,
               borderColor: 'rgba(255,255,255,0.1)'
@@ -440,7 +438,7 @@ const DashboardTab = React.memo(({
             </Text>
           </TouchableOpacity>
         </View>
-        
+
         {showPca && (
           <View style={{ marginTop: 12 }}>
             {embeddingHistory.length < 20 ? (
@@ -459,20 +457,20 @@ const DashboardTab = React.memo(({
               </View>
             ) : (
               <View>
-                <View style={{ 
-                  backgroundColor: 'rgba(0,0,0,0.2)', 
-                  borderRadius: 10, 
-                  borderWidth: 1, 
+                <View style={{
+                  backgroundColor: 'rgba(0,0,0,0.2)',
+                  borderRadius: 10,
+                  borderWidth: 1,
                   borderColor: 'rgba(255,255,255,0.05)',
-                  alignItems: 'center', 
-                  padding: 10 
+                  alignItems: 'center',
+                  padding: 10
                 }}>
                   <Svg height="200" width="260">
                     {/* Grid lines */}
                     <Line x1="30" y1="30" x2="230" y2="30" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
                     <Line x1="30" y1="100" x2="230" y2="100" stroke="rgba(255,255,255,0.05)" strokeWidth="1" strokeDasharray="4 4" />
                     <Line x1="30" y1="170" x2="230" y2="170" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
-                    
+
                     <Line x1="30" y1="30" x2="30" y2="170" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
                     <Line x1="130" y1="30" x2="130" y2="170" stroke="rgba(255,255,255,0.05)" strokeWidth="1" strokeDasharray="4 4" />
                     <Line x1="230" y1="30" x2="230" y2="170" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
@@ -501,7 +499,7 @@ const DashboardTab = React.memo(({
                     })}
                   </Svg>
                 </View>
-                
+
                 {/* Legend & stats */}
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginTop: 10 }}>
                   {[
@@ -517,19 +515,19 @@ const DashboardTab = React.memo(({
                     </View>
                   ))}
                 </View>
-                
+
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
                   <Text style={{ color: '#64748B', fontSize: 9 }}>
                     Plotted: {embeddingHistory.length} / 50 samples (idle when hidden)
                   </Text>
                   <View style={{ flexDirection: 'row', gap: 10 }}>
-                    <TouchableOpacity 
+                    <TouchableOpacity
                       onPress={handleResetPca}
                       style={{ padding: 4 }}
                     >
                       <Text style={{ color: '#3B82F6', fontSize: 10, fontWeight: '700' }}>🔄 Refresh</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity 
+                    <TouchableOpacity
                       onPress={handleResetPca}
                       style={{ padding: 4 }}
                     >
@@ -588,17 +586,23 @@ const DashboardTab = React.memo(({
         {/* List of active multipliers */}
         <View style={styles.multiplierList}>
           <Text style={styles.multiplierItem}>
-            • Raw Motion Anomaly: {Math.round(currentPacket.anomalyScore / 1.28)}%
+            • Raw Motion Anomaly: {currentPacket.anomalyScore.toFixed(3)}
           </Text>
           <Text style={styles.multiplierItem}>
-            • Location modifier: {location === 'HOME' ? '×0.55 (Home)' : location === 'KNOWN_SAFE' ? '×0.65 (Safe)' : location === 'UNKNOWN_ISOLATED' ? '×1.35 (Isolated)' : '×1.00 (Urban)'}
+            • Real-time Location Node: {LocationEngine.activeVisit ? `Node #${LocationEngine.activeVisit.location_node_id}` : 'Outside Geofence'}
           </Text>
           <Text style={styles.multiplierItem}>
-            • Time modifier: {timeOfDay === 'NIGHT_RISK' ? '×1.20 (Night)' : timeOfDay === 'LATE_NIGHT' ? '×1.15 (Late Night)' : timeOfDay === 'DAYTIME' ? '×0.90 (Day)' : '×1.00'}
+            • Session Familiarity (L1): {Math.round(famLevel1 * 100)}%
           </Text>
-          {postAnomalyStillness && (
+          <Text style={styles.multiplierItem}>
+            • Daily Familiarity (L2): {Math.round(famLevel2 * 100)}%
+          </Text>
+          <Text style={[styles.multiplierItem, { color: '#60A5FA', fontWeight: 'bold' }]}>
+            • Final Familiarity Score: {Math.round(famFinal * 100)}% (Modulation: ×{(1.3 - 0.6 * famFinal).toFixed(2)})
+          </Text>
+          {(currentPacket.anomalyScore > 0.79 && (currentPacket.motionState & (1 << 0)) !== 0) && (
             <Text style={[styles.multiplierItem, { color: '#EF4444' }]}>
-              • Post-Anomaly Stillness detected (+0.15 score bonus)
+              • Real-time Post-Anomaly Stillness detected (+0.15 score bonus)
             </Text>
           )}
           {cooldownActive && (
@@ -629,55 +633,6 @@ const DashboardTab = React.memo(({
             <View style={[styles.graphLegendPin, { backgroundColor: 'rgba(239, 68, 68, 0.5)' }]} />
             <Text style={styles.legendText}>Anomaly Score (scaled)</Text>
           </View>
-        </View>
-      </View>
-
-      {/* Environmental Context Configurator */}
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Location & Environmental Context</Text>
-        <Text style={styles.subtext}>Modulate these variables to test risk multipliers:</Text>
-        
-        <Text style={styles.sectionLabel}>Geolocation geofence:</Text>
-        <View style={styles.row}>
-          {['HOME', 'UNKNOWN_URBAN', 'UNKNOWN_ISOLATED'].map((loc) => (
-            <TouchableOpacity
-              delayPressIn={0}
-              key={loc}
-              style={[styles.segmentBtn, location === loc && styles.segmentBtnActive]}
-              onPress={() => setLocation(loc)}
-            >
-              <Text style={[styles.segmentBtnText, location === loc && styles.segmentBtnTextActive]}>
-                {loc.replace('_', ' ')}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        <Text style={styles.sectionLabel}>Time of day:</Text>
-        <View style={styles.row}>
-          {['DAYTIME', 'MORNING', 'NIGHT_RISK'].map((time) => (
-            <TouchableOpacity
-              delayPressIn={0}
-              key={time}
-              style={[styles.segmentBtn, timeOfDay === time && styles.segmentBtnActive]}
-              onPress={() => setTimeOfDay(time)}
-            >
-              <Text style={[styles.segmentBtnText, timeOfDay === time && styles.segmentBtnTextActive]}>
-                {time.replace('_', ' ')}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        <View style={styles.rowBetween}>
-          <Text style={styles.sectionLabel}>Post-Anomaly Stillness:</Text>
-          <TouchableOpacity
-            delayPressIn={0}
-            style={[styles.toggleBtn, postAnomalyStillness && styles.toggleBtnActive]}
-            onPress={() => setPostAnomalyStillness(!postAnomalyStillness)}
-          >
-            <Text style={styles.toggleBtnText}>{postAnomalyStillness ? 'ACTIVE (+0.15)' : 'INACTIVE'}</Text>
-          </TouchableOpacity>
         </View>
       </View>
 
@@ -734,10 +689,10 @@ const DashboardTab = React.memo(({
             >
               {['ALL', 'TINYML', 'CONTEXT', 'SYSTEM'].map((f) => {
                 const chipColors = {
-                  ALL:     '#6B7280',
-                  TINYML:  '#3B82F6',
+                  ALL: '#6B7280',
+                  TINYML: '#3B82F6',
                   CONTEXT: '#8B5CF6',
-                  SYSTEM:  '#10B981',
+                  SYSTEM: '#10B981',
                 };
                 const active = logFilter === f;
                 return (

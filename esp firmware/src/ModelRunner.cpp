@@ -2,7 +2,6 @@
 #include "Config.h"
 #include "IMUSensor.h"
 #include "model_data.h"
-#include "scaling_params.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/tflite_bridge/micro_error_reporter.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -178,8 +177,7 @@ ModelRunner& ModelRunner::getInstance() {
 }
 
 ModelRunner::ModelRunner() 
-    : testAlertActive(false)
-    , tensorsAllocated(false)
+    : tensorsAllocated(false)
     , interpreter(nullptr)
     , model(nullptr)
     , raw_arena(nullptr)
@@ -255,35 +253,6 @@ bool ModelRunner::begin() {
 }
 
 float ModelRunner::runInference(const float* featureVector, int8_t* out_embedding) {
-    if (testAlertActive) {
-        if (out_embedding != nullptr) {
-            memset(out_embedding, 0x2A, 16); // Mock embedding pattern
-        }
-        return 0.95f;
-    }
-
-    // Apply mock overrides if Mock IMU is enabled for telemetry verification
-#if USE_MOCK_IMU
-    MockMotionState state = IMUSensor::getInstance().getMockState();
-    if (state == MOCK_MOTION_STRUGGLE) {
-        if (out_embedding != nullptr) {
-            memset(out_embedding, 0x1F, 16); // Mock struggle embedding
-        }
-        return 0.85f;
-    } else if (state == MOCK_MOTION_FALL) {
-        // Fall simulation: high variance initially, then high anomalies
-        float totalVariance = featureVector[1320 + 5]; // Trace of covariance at index 1320 + 5 = 1325
-        float peakJerk = featureVector[9 * 132 + 78];  // Jerk in the last subwindow
-        if (out_embedding != nullptr) {
-            memset(out_embedding, 0x3F, 16); // Mock fall embedding
-        }
-        if (totalVariance > 45000.0f || (totalVariance < 2.5f && peakJerk > 20.0f)) {
-            return 0.90f;
-        }
-        return 0.15f;
-    }
-#endif
-
     if (!tensorsAllocated || interpreter == nullptr) {
         if (out_embedding != nullptr) {
             memset(out_embedding, 0, 16);
@@ -305,8 +274,11 @@ float ModelRunner::runInference(const float* featureVector, int8_t* out_embeddin
     for (int i = 0; i < 1320; i++) {
         int featureIdx = i % 132;
         float val = featureVector[i];
-        // Apply z-score normalization
-        float norm_val = (val - SEQ_MEAN[featureIdx]) / (SEQ_STD[featureIdx] > 1e-6f ? SEQ_STD[featureIdx] : 1e-6f);
+        // Apply z-score normalization with division-by-zero prevention
+        float norm_val = 0.0f;
+        if (g_seq_std[featureIdx] > 1e-6f) {
+            norm_val = (val - g_seq_mean[featureIdx]) / g_seq_std[featureIdx];
+        }
         int32_t qval = roundf(norm_val / scale_seq) + zp_seq;
         if (qval < -128) qval = -128;
         if (qval > 127) qval = 127;
@@ -320,8 +292,11 @@ float ModelRunner::runInference(const float* featureVector, int8_t* out_embeddin
 
     for (int i = 0; i < 12; i++) {
         float val = featureVector[1320 + i];
-        // Apply z-score normalization
-        float norm_val = (val - GLOB_MEAN[i]) / (GLOB_STD[i] > 1e-6f ? GLOB_STD[i] : 1e-6f);
+        // Apply z-score normalization with division-by-zero prevention
+        float norm_val = 0.0f;
+        if (g_glob_std[i] > 1e-6f) {
+            norm_val = (val - g_glob_mean[i]) / g_glob_std[i];
+        }
         int32_t qval = roundf(norm_val / scale_glob) + zp_glob;
         if (qval < -128) qval = -128;
         if (qval > 127) qval = 127;
@@ -362,18 +337,14 @@ float ModelRunner::runInference(const float* featureVector, int8_t* out_embeddin
 
     float recon_error = 0.0f;
     if (err_tensor != nullptr) {
-        float err_scale = err_tensor->params.scale;
-        int32_t err_zp = err_tensor->params.zero_point;
-        recon_error = (static_cast<float>(err_tensor->data.int8[0]) - err_zp) * err_scale;
+        int8_t rawVal = err_tensor->data.int8[0];
+        recon_error = (static_cast<float>(rawVal) - (-128)) * 0.00441764f;
     }
 
     return recon_error;
 }
 
-void ModelRunner::setTestAlert(bool active) {
-    testAlertActive = active;
-    Serial.printf("[Model] Test Alert override: %s\n", active ? "ACTIVE" : "INACTIVE");
-}
+
 
 extern "C" char g_last_tflm_error[256] = "";
 

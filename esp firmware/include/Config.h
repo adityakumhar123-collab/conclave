@@ -3,10 +3,6 @@
 
 #include <Arduino.h>
 
-// ==========================================
-// Debug & Hardware Simulation Switches
-// ==========================================
-#define USE_MOCK_IMU false // Set to false to use physical MPU-6050
 
 // ==========================================
 // Sensor and Windowing Settings
@@ -31,8 +27,8 @@
 // ==========================================
 // Anomaly Detection Constants
 // ==========================================
-#define DEFAULT_THRESHOLD 1.01647f // Calculated threshold (mu + 3*sigma) for Model v2 20-epoch
-#define HYSTERESIS_WINDOWS 3 // Must exceed threshold for this many windows
+#define DEFAULT_THRESHOLD 1.01309f // Calculated threshold (mu + 3*sigma) for Model v2 20-epoch
+#define HYSTERESIS_WINDOWS 5 // Must exceed threshold for this many windows
 
 // ==========================================
 // Hardware Pin Mappings (Seeed Studio XIAO ESP32S3)

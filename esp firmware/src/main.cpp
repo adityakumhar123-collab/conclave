@@ -156,7 +156,7 @@ void IMUSamplerTask(void* pvParameters) {
                         sample,
                         resultant,
                         jerk,
-                        static_cast<uint8_t>(fminf((currentAnomalyScore / DEFAULT_THRESHOLD) * 128.0f, 255.0f))
+                        static_cast<uint8_t>(fminf(fmaxf(roundf(currentAnomalyScore / 0.00441764f), 0.0f), 255.0f))
                     );
                 }
             } else {
@@ -266,7 +266,7 @@ void ProcessingTask(void* pvParameters) {
                     motionState |= (1 << 7); // Bit 7: Model Allocated successfully
                 }
 
-                uint8_t scaledScore = static_cast<uint8_t>(fminf((anomalyScore / DEFAULT_THRESHOLD) * 128.0f, 255.0f));
+                uint8_t scaledScore = static_cast<uint8_t>(fminf(fmaxf(roundf(anomalyScore / 0.00441764f), 0.0f), 255.0f));
 
                 // Send live 2 Hz feature stream to the mobile app for dynamic gauges
                 if (BLEManager::getInstance().isConnected()) {
@@ -296,8 +296,8 @@ void ProcessingTask(void* pvParameters) {
                             
                             // Scale confidence based on persistence
                             uint8_t confidence = 33;
-                            if (consecutiveAnomalyWindows >= 9) confidence = 99;
-                            else if (consecutiveAnomalyWindows >= 6) confidence = 66;
+                            if (consecutiveAnomalyWindows >= 11) confidence = 99;
+                            else if (consecutiveAnomalyWindows >= 8) confidence = 66;
 
                             uint16_t secondsSinceBoot = static_cast<uint16_t>(millis() / 1000);
                             uint8_t durationUnits = static_cast<uint8_t>(consecutiveAnomalyWindows * 5); // Stride 50 samples = 0.5s = 5 units
@@ -360,7 +360,7 @@ void HeartbeatTask(void* pvParameters) {
                 // Calculate 60s rolling average anomaly score
                 uint8_t avgAnomaly = 0;
                 if (runningAnomalyCount > 0) {
-                    avgAnomaly = static_cast<uint8_t>(fminf(((runningAnomalySum / runningAnomalyCount) / DEFAULT_THRESHOLD) * 128.0f, 255.0f));
+                    avgAnomaly = static_cast<uint8_t>(fminf(fmaxf(roundf((runningAnomalySum / runningAnomalyCount) / 0.00441764f), 0.0f), 255.0f));
                     // Reset rolling accumulations
                     runningAnomalySum = 0.0f;
                     runningAnomalyCount = 0;

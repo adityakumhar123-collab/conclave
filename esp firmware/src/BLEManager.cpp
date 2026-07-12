@@ -5,15 +5,22 @@
 
 // Connection callbacks
 class BLEServerCallbacksImpl : public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) override {
+        BLEManager::getInstance().setConnected(true);
+    }
+
     void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override {
         BLEManager::getInstance().setConnected(true);
+        // Commented out to let phone's OS manage stable defaults, preventing early disconnects
+        /*
         pServer->updateConnParams(
             param->connect.remote_bda,
-            6,    // minInterval = 7.5ms
-            12,   // maxInterval = 15ms
+            24,   // minInterval = 30ms
+            40,   // maxInterval = 50ms
             0,    // latency = 0
             400   // timeout = 4s supervision timeout
         );
+        */
     }
 
     void onDisconnect(BLEServer* pServer) override {
@@ -26,7 +33,8 @@ class BLECharacteristicCallbacksImpl : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* pCharacteristic) override {
         std::string value = pCharacteristic->getValue();
         if (value.length() == 0) return;
-        BLEManager::getInstance().setPendingCommand(static_cast<uint8_t>(value[0]));
+        uint8_t cmd = static_cast<uint8_t>(value[0]);
+        BLEManager::getInstance().processCommand(cmd);
     }
 };
 
@@ -353,39 +361,8 @@ void BLEManager::processCommand(uint8_t command) {
             calibrationRequest = true;
             Serial.println("[BLE] Command: Calibration requested.");
             break;
-        case 0x06: // Trigger test alert (QA / demo mode)
-            ModelRunner::getInstance().setTestAlert(true);
-            Serial.println("[BLE] Command: Test alert triggered.");
-            break;
-            
-        // Custom Mock State commands for interactive testing
-        case 0x07:
-#if USE_MOCK_IMU
-            IMUSensor::getInstance().setMockState(MOCK_MOTION_RESTING);
-#endif
-            Serial.println("[BLE] Command: Set Mock state to RESTING.");
-            break;
-        case 0x08:
-#if USE_MOCK_IMU
-            IMUSensor::getInstance().setMockState(MOCK_MOTION_WALKING);
-#endif
-            Serial.println("[BLE] Command: Set Mock state to WALKING.");
-            break;
-        case 0x09:
-#if USE_MOCK_IMU
-            IMUSensor::getInstance().setMockState(MOCK_MOTION_STRUGGLE);
-#endif
-            Serial.println("[BLE] Command: Set Mock state to STRUGGLE.");
-            break;
-        case 0x0A:
-#if USE_MOCK_IMU
-            IMUSensor::getInstance().setMockState(MOCK_MOTION_FALL);
-#endif
-            Serial.println("[BLE] Command: Set Mock state to FALL.");
-            break;
 
         case 0xFF: // Emergency cancel (user confirmed safe)
-            ModelRunner::getInstance().setTestAlert(false);
             eventAck = true;
             Serial.println("[BLE] Command: Emergency cancel.");
             break;
