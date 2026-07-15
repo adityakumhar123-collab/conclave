@@ -14,7 +14,7 @@
 //      across 3 temporal scales:
 //        Level 1: Last 15–30 minutes (is this UNUSUAL for the current session?)
 //        Level 2: Earlier today (is this UNUSUAL for this time of day today?)
-//        Level 3: Last 30 days at this time (is this UNUSUAL historically?)
+//        Level 3: Last 7 days at this time (is this UNUSUAL historically?)
 //
 //   2. computeThreatScoreDetailed()  — Takes a BLE FEATURE/EVENT packet + the
 //      familiarity score and computes a 0.0–1.0 threat score. This score drives
@@ -50,7 +50,7 @@
 //
 //   Level weights in the final familiarity score:
 //     finalFamiliarity = 0.2 × L1 + 0.3 × L2 + 0.5 × L3
-//     (Historical 30-day similarity is weighted most heavily — most reliable signal)
+//     (Historical 7-day similarity is weighted most heavily — most reliable signal)
 //
 // THREAT SCORE PIPELINE (computeThreatScoreDetailed):
 //   1. Normalize anomaly MAE score against the calibrated threshold (1.01309)
@@ -74,18 +74,17 @@
 //   ⚠ getLocationNodeIdAt() calls initDatabase() on every invocation. Since
 //     initDatabase() is idempotent (returns cached db after first call), this is
 //     safe but adds a tiny overhead for every location lookup.
-//   ⚠ Level 3 historical comparison fetches ALL observations from the last 30 days
+//   ⚠ Level 3 historical comparison fetches ALL observations from the last 7 days
 //     at the matching time window across ALL past dates. If the user has used the
 //     device for many months, this query could return many rows. The groupByDate
 //     logic then runs N DB queries (one per unique date). For large datasets this
 //     could become slow. A pre-aggregated summary table would be more efficient.
 // =============================================================================
 
-import { 
+import {
   initDatabase,
-  storeInference,
   getIsoDateString,
-  getIsoTimeString 
+  getIsoTimeString
 } from './Database.js';
 import { LocationEngine } from './LocationEngine.js';
 
@@ -123,9 +122,9 @@ export function getHaversineDistance(lat1, lon1, lat2, lon2) {
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(toRad(lat1)) *
-      Math.cos(toRad(lat2)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
+    Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) *
+    Math.sin(dLon / 2);
 
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
@@ -168,19 +167,19 @@ export function buildContextWindow(dateStr, timeStr, windowSizeMinutes = 15, loc
       const prevDateObj = new Date(new Date(dateStr).getTime() - 86400000);
       const prevDateStr = getIsoDateString(prevDateObj);
       const startT = secondsToTimeStr(86400 + startSec);
-      
+
       const rowsPrev = db.getAllSync(`
         SELECT * FROM observations 
         WHERE date = ? AND time >= ?
         ORDER BY date ASC, time ASC;
       `, [prevDateStr, startT]);
-      
+
       const rowsToday = db.getAllSync(`
         SELECT * FROM observations 
         WHERE date = ? AND time <= ?
         ORDER BY date ASC, time ASC;
       `, [dateStr, timeStr]);
-      
+
       rawObs = [...rowsPrev, ...rowsToday];
     }
   } catch (e) {
@@ -380,7 +379,7 @@ class ContextEngineClass {
         WHERE date = ? AND time < ?
         ORDER BY time ASC;
       `, [dateStr, limitTime]);
-      
+
       rows.forEach(r => {
         earlierObs.push({
           ...r,
@@ -437,7 +436,7 @@ class ContextEngineClass {
       const targetSec = timeStrToSeconds(timeStr);
       const startSec = targetSec - 15 * 60;
       const endSec = targetSec + 15 * 60;
-      
+
       let rows = [];
       if (startSec < 0) {
         rows = db.getAllSync(`
@@ -481,7 +480,7 @@ class ContextEngineClass {
     if (dates.length > 0) {
       let sumSim = 0.0;
       let count = 0;
-      
+
       dates.forEach(d => {
         const obsList = groupedHist[d];
         if (obsList.length > 0) {
@@ -494,10 +493,10 @@ class ContextEngineClass {
 
       if (count > 0) {
         level3 = sumSim / count;
-        this.logs.push(`Level 3 (30 Days): Evaluated ${count} historical days. Average Similarity: ${level3.toFixed(3)}`);
+        this.logs.push(`Level 3 (7 Days): Evaluated ${count} historical days. Average Similarity: ${level3.toFixed(3)}`);
       }
     } else {
-      this.logs.push(`Level 3 (30 Days): No historical matching time windows, defaulted to 0.5`);
+      this.logs.push(`Level 3 (7 Days): No historical matching time windows, defaulted to 0.5`);
     }
 
     // 5. Fuse final familiarity score
@@ -520,9 +519,6 @@ export const ContextEngine = new ContextEngineClass();
 export function computeThreatScoreDetailed(packet, contextConfig = {}) {
   const logs = [];
   const {
-    location = 'UNKNOWN_URBAN',
-    timeOfDay = 'MORNING',
-    postAnomalyStillness = false,
     familiarityScore = 1.0, // default familiarity keeps threat score down
   } = contextConfig;
 
@@ -568,7 +564,7 @@ export function computeThreatScoreDetailed(packet, contextConfig = {}) {
 
   // 2. Anomaly Duration
   const durationSec = packet.anomalyDuration * 0.1;
-  const scoreConfidence = packet.anomalyScore / 255;
+  const scoreConfidence = packet.anomalyScore / 1.1265;
   const minDurationFactor = scoreConfidence * 0.55;
 
   let durationFactor = minDurationFactor;
@@ -598,7 +594,7 @@ export function computeThreatScoreDetailed(packet, contextConfig = {}) {
   threatScore *= familiarityFactor;
   logs.push(`Familiarity Modulation: F=${familiarityScore.toFixed(3)} | Factor=${familiarityFactor.toFixed(2)}`);
 
-  // 7. Wear Confidence
+  // 5. Wear Confidence
   if (packet.wearConfidence < 40) {
     threatScore = 0.0;
     logs.push(`Wear Confidence ${packet.wearConfidence}% < 40%: SUPPRESSED`);

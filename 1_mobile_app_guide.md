@@ -81,7 +81,7 @@ The **ContextEngine** determines the behavioral anomaly profile of the current m
 * **Familiarity Scoring (3-Level Comparison):** It compares the current 15-minute behavioral window ($W_T$) against three historical baselines:
   - **Level 1 (Session):** $W_T$ vs. the last 15–30 minutes. Determines if the user's activity has suddenly changed during the current session.
   - **Level 2 (Circadian Today):** $W_T$ vs. earlier periods today.
-  - **Level 3 (Circadian Historical):** $W_T$ vs. the same 15-minute slot over the last 30 days (excluding today).
+  - **Level 3 (Circadian Historical):** $W_T$ vs. the same 15-minute slot over the last 7 days (excluding today).
 * **Similarity Metric:** Calculates a combined similarity score based on:
   - Motion distribution cosine similarity
   - Location node matching (GPS distance)

@@ -82,7 +82,7 @@
 //   Section 9: Location Nodes API (saveLocationNode, getLocationNode, getLocationNodes)
 //   Section 10: Location Visits API (saveLocationVisit, getLocationVisit, getLocationVisits)
 //   Section 11: Inference Logs API (storeInference, getInferenceHistory)
-//   Section 12: Retention Policy (enforceRetentionPolicy — deletes data > 30 days old)
+//   Section 12: Retention Policy (enforceRetentionPolicy — deletes data > 7 days old)
 //
 // BUGS / NOTES:
 //   ⚠ All JSON fields (embeddings, cluster_distribution, motion_features, etc.)
@@ -893,9 +893,9 @@ export function getInferenceHistory(limit = 100) {
 // 8. Retention Cleanup Service API
 export function enforceRetentionPolicy() {
   const database = initDatabase();
-  const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-  const cutoffDate = getIsoDateString(thirtyDaysAgo);
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+  const cutoffDate = getIsoDateString(sevenDaysAgo);
 
   // Enforce retention for observations, timelines, and inference logs
   const obsRes = database.runSync('DELETE FROM observations WHERE date < ?;', [cutoffDate]);

@@ -141,4 +141,4 @@ To prevent false alarms and malicious misuse, the system implements three protec
 2. **Wear Confidence Mask:**
    Edge-level checks suppress anomaly detection if the band is not worn. If total acceleration variance remains below 100 for 10 minutes, wear confidence decays to 0% and suppresses alert events.
 3. **Database Retention Policy:**
-   Every time the user runs a database cleanup, a background process removes observations, timelines, and inference logs older than 30 days. This keeps database query times fast and ensures the 30-day circadian comparison runs efficiently.
+   Every time the user runs a database cleanup, a background process removes observations, timelines, and inference logs older than 7 days. This keeps database query times fast and ensures the 7-day circadian comparison runs efficiently.
