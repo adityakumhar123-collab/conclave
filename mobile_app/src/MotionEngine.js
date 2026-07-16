@@ -162,7 +162,8 @@ class MotionEngineClass {
       eigenvalueRatio: p.eigenvalueRatio,  // Linearity metric (>700 = fall-like)
       wearConfidence: p.wearConfidence,    // % certainty wristband is worn
       peakAccel: p.peakAccel,              // Maximum acceleration in window (mg)
-      anomalyDuration: p.anomalyDuration   // How long anomaly has persisted (×100ms)
+      anomalyDuration: p.anomalyDuration,  // How long anomaly has persisted (×100ms)
+      twelveFeatures: p.twelveFeatures || [] // The dequantized 12-feature array
     }));
 
     // ===========================================================================

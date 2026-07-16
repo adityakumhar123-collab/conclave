@@ -145,6 +145,9 @@ const DashboardTab = React.memo(({
   logsHistoryRef,
   renderedLogs,
   threatLevel,
+  threatScore3s = 0.0,
+  threatScore3m = 0.0,
+  threatScore5m = 0.0,
   famLevel1 = 1.0,
   famLevel2 = 1.0,
   famFinal = 1.0
@@ -583,28 +586,52 @@ const DashboardTab = React.memo(({
 
         <Text style={styles.gaugeActionText}>Action: {threatLevel.action}</Text>
 
-        {/* List of active multipliers */}
-        <View style={styles.multiplierList}>
+        {/* Three horizontal mini-progress bars */}
+        <View style={{ marginTop: 16, gap: 10 }}>
+          <Text style={{ color: '#E2E8F0', fontSize: 11, fontWeight: '700' }}>Window Threat Scores Breakdown:</Text>
+          
+          {/* 3s Window */}
+          <View>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 2 }}>
+              <Text style={{ color: '#94A3B8', fontSize: 10 }}>• 3-Second Window (Live)</Text>
+              <Text style={{ color: '#E2E8F0', fontSize: 10, fontWeight: 'bold' }}>{Math.round(threatScore3s * 100)}%</Text>
+            </View>
+            <View style={{ height: 6, backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: 3, overflow: 'hidden' }}>
+              <View style={{ height: '100%', width: `${threatScore3s * 100}%`, backgroundColor: '#EF4444' }} />
+            </View>
+          </View>
+
+          {/* 3m Window */}
+          <View>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 2 }}>
+              <Text style={{ color: '#94A3B8', fontSize: 10 }}>• 3-Minute Window (Short-term)</Text>
+              <Text style={{ color: '#E2E8F0', fontSize: 10, fontWeight: 'bold' }}>{Math.round(threatScore3m * 100)}%</Text>
+            </View>
+            <View style={{ height: 6, backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: 3, overflow: 'hidden' }}>
+              <View style={{ height: '100%', width: `${threatScore3m * 100}%`, backgroundColor: '#F59E0B' }} />
+            </View>
+          </View>
+
+          {/* 5m Window */}
+          <View>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 2 }}>
+              <Text style={{ color: '#94A3B8', fontSize: 10 }}>• 5-Minute Window (Long-term)</Text>
+              <Text style={{ color: '#E2E8F0', fontSize: 10, fontWeight: 'bold' }}>{Math.round(threatScore5m * 100)}%</Text>
+            </View>
+            <View style={{ height: 6, backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: 3, overflow: 'hidden' }}>
+              <View style={{ height: '100%', width: `${threatScore5m * 100}%`, backgroundColor: '#3B82F6' }} />
+            </View>
+          </View>
+        </View>
+
+        {/* Multipliers & context status */}
+        <View style={[styles.multiplierList, { marginTop: 14 }]}>
           <Text style={styles.multiplierItem}>
-            • Raw Motion Anomaly: {currentPacket.anomalyScore.toFixed(3)}
-          </Text>
-          <Text style={styles.multiplierItem}>
-            • Real-time Location Node: {LocationEngine.activeVisit ? `Node #${LocationEngine.activeVisit.location_node_id}` : 'Outside Geofence'}
-          </Text>
-          <Text style={styles.multiplierItem}>
-            • Session Familiarity (L1): {Math.round(famLevel1 * 100)}%
-          </Text>
-          <Text style={styles.multiplierItem}>
-            • Daily Familiarity (L2): {Math.round(famLevel2 * 100)}%
+            • Current Location node: {LocationEngine.activeVisit ? `Node #${LocationEngine.activeVisit.location_node_id}` : 'Outside Geofence'}
           </Text>
           <Text style={[styles.multiplierItem, { color: '#60A5FA', fontWeight: 'bold' }]}>
-            • Final Familiarity Score: {Math.round(famFinal * 100)}% (Modulation: ×{(1.3 - 0.6 * famFinal).toFixed(2)})
+            • Location Familiarity Score: {Math.round(famFinal * 100)}%
           </Text>
-          {(currentPacket.anomalyScore > 0.79 && (currentPacket.motionState & (1 << 0)) !== 0) && (
-            <Text style={[styles.multiplierItem, { color: '#EF4444' }]}>
-              • Real-time Post-Anomaly Stillness detected (+0.15 score bonus)
-            </Text>
-          )}
           {cooldownActive && (
             <Text style={[styles.multiplierItem, { color: '#3B82F6' }]}>
               • Cooldown Active: Threat score scaled to 60% ({cooldownTime}s remaining)

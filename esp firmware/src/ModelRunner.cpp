@@ -10,27 +10,40 @@
 
 namespace {
 TfLiteStatus TilePrepare(TfLiteContext* context, TfLiteNode* node) {
+  tflite::MicroContext* micro_context = tflite::GetMicroContext(context);
   TF_LITE_ENSURE_EQ(context, node->inputs->size, 2);
   TF_LITE_ENSURE_EQ(context, node->outputs->size, 1);
 
-  const TfLiteTensor* input = tflite::GetInput(context, node, 0);
-  const TfLiteTensor* multiples = tflite::GetInput(context, node, 1);
-  TfLiteTensor* output = tflite::GetOutput(context, node, 0);
+  TfLiteTensor* input = micro_context->AllocateTempInputTensor(node, 0);
+  TF_LITE_ENSURE(context, input != nullptr);
+  TfLiteTensor* multiples = micro_context->AllocateTempInputTensor(node, 1);
+  TF_LITE_ENSURE(context, multiples != nullptr);
+  TfLiteTensor* output = micro_context->AllocateTempOutputTensor(node, 0);
+  TF_LITE_ENSURE(context, output != nullptr);
 
-  TF_LITE_ENSURE_EQ(context, output->type, input->type);
-  TF_LITE_ENSURE(context, multiples->type == kTfLiteInt32 || multiples->type == kTfLiteInt64);
+  TfLiteStatus status = kTfLiteOk;
+  if (output->type != input->type) {
+    status = kTfLiteError;
+  } else if (multiples->type != kTfLiteInt32 && multiples->type != kTfLiteInt64) {
+    status = kTfLiteError;
+  } else {
+    int num_dims = input->dims->size;
+    if (multiples->dims->size != 1 || multiples->dims->data[0] != num_dims) {
+      status = kTfLiteError;
+    }
+  }
 
-  int num_dims = input->dims->size;
-  TF_LITE_ENSURE_EQ(context, multiples->dims->size, 1);
-  TF_LITE_ENSURE_EQ(context, multiples->dims->data[0], num_dims);
-
-  return kTfLiteOk;
+  micro_context->DeallocateTempTfLiteTensor(input);
+  micro_context->DeallocateTempTfLiteTensor(multiples);
+  micro_context->DeallocateTempTfLiteTensor(output);
+  return status;
 }
 
 TfLiteStatus TileInvoke(TfLiteContext* context, TfLiteNode* node) {
-  const TfLiteTensor* input = tflite::GetInput(context, node, 0);
-  const TfLiteTensor* multiples = tflite::GetInput(context, node, 1);
-  TfLiteTensor* output = tflite::GetOutput(context, node, 0);
+  tflite::MicroContext* micro_context = tflite::GetMicroContext(context);
+  TfLiteTensor* input = micro_context->AllocateTempInputTensor(node, 0);
+  TfLiteTensor* multiples = micro_context->AllocateTempInputTensor(node, 1);
+  TfLiteTensor* output = micro_context->AllocateTempOutputTensor(node, 0);
 
   TF_LITE_ENSURE_EQ(context, input->type, kTfLiteInt8);
 
@@ -38,6 +51,7 @@ TfLiteStatus TileInvoke(TfLiteContext* context, TfLiteNode* node) {
   int8_t* output_data = output->data.int8;
 
   int num_dims = input->dims->size;
+  TfLiteStatus status = kTfLiteOk;
   
   if (num_dims == 3) {
     int d0 = input->dims->data[0];
@@ -69,11 +83,15 @@ TfLiteStatus TileInvoke(TfLiteContext* context, TfLiteNode* node) {
         }
       }
     }
-    return kTfLiteOk;
+  } else {
+    TF_LITE_KERNEL_LOG(context, "Only 3D Tile is currently supported in this custom op.");
+    status = kTfLiteError;
   }
 
-  TF_LITE_KERNEL_LOG(context, "Only 3D Tile is currently supported in this custom op.");
-  return kTfLiteError;
+  micro_context->DeallocateTempTfLiteTensor(input);
+  micro_context->DeallocateTempTfLiteTensor(multiples);
+  micro_context->DeallocateTempTfLiteTensor(output);
+  return status;
 }
 
 TfLiteStatus TileParse(const tflite::Operator* op, tflite::ErrorReporter* error_reporter,
@@ -89,25 +107,31 @@ TfLiteStatus ReduceProdPrepare(TfLiteContext* context, TfLiteNode* node) {
 }
 
 TfLiteStatus ReduceProdInvoke(TfLiteContext* context, TfLiteNode* node) {
-  const TfLiteTensor* input = tflite::GetInput(context, node, 0);
-  TfLiteTensor* output = tflite::GetOutput(context, node, 0);
+  tflite::MicroContext* micro_context = tflite::GetMicroContext(context);
+  TfLiteTensor* input = micro_context->AllocateTempInputTensor(node, 0);
+  TfLiteTensor* output = micro_context->AllocateTempOutputTensor(node, 0);
 
-  TF_LITE_ENSURE_EQ(context, input->type, kTfLiteInt32);
-  TF_LITE_ENSURE_EQ(context, output->type, kTfLiteInt32);
+  TfLiteStatus status = kTfLiteOk;
+  if (input->type != kTfLiteInt32 || output->type != kTfLiteInt32) {
+    status = kTfLiteError;
+  } else {
+    int32_t prod = 1;
+    int num_elements = 1;
+    for (int i = 0; i < input->dims->size; i++) {
+      num_elements *= input->dims->data[i];
+    }
 
-  int32_t prod = 1;
-  int num_elements = 1;
-  for (int i = 0; i < input->dims->size; i++) {
-    num_elements *= input->dims->data[i];
+    const int32_t* input_data = input->data.i32;
+    for (int i = 0; i < num_elements; i++) {
+      prod *= input_data[i];
+    }
+
+    output->data.i32[0] = prod;
   }
 
-  const int32_t* input_data = input->data.i32;
-  for (int i = 0; i < num_elements; i++) {
-    prod *= input_data[i];
-  }
-
-  output->data.i32[0] = prod;
-  return kTfLiteOk;
+  micro_context->DeallocateTempTfLiteTensor(input);
+  micro_context->DeallocateTempTfLiteTensor(output);
+  return status;
 }
 
 TfLiteStatus ReduceProdParse(const tflite::Operator* op, tflite::ErrorReporter* error_reporter,
@@ -168,8 +192,8 @@ class SafeBandOpResolver : public tflite::MicroMutableOpResolver<40> {
 };
 } // namespace
 
-alignas(16) static uint8_t static_tensor_arena[140 * 1024];
-constexpr int kArenaSize = 140 * 1024;
+alignas(16) static uint8_t static_tensor_arena[165 * 1024];
+constexpr int kArenaSize = 165 * 1024;
 
 ModelRunner& ModelRunner::getInstance() {
     static ModelRunner instance;
@@ -242,12 +266,21 @@ bool ModelRunner::begin() {
     Serial.println("[Model] Allocating Tensors...");
     TfLiteStatus allocate_status = static_interpreter.AllocateTensors();
     if (allocate_status != kTfLiteOk) {
-        Serial.println("[Model] Error: AllocateTensors() failed.");
+        Serial.printf("[Model] Error: AllocateTensors() failed with status %d.\n", allocate_status);
         tensorsAllocated = false;
         return false;
     }
 
     tensorsAllocated = true;
+    Serial.printf("[Model] Outputs size: %d\n", static_interpreter.outputs_size());
+    for (int i = 0; i < static_interpreter.outputs_size(); ++i) {
+        TfLiteTensor* out = static_interpreter.output(i);
+        Serial.printf("[Model] Output %d: Name=%s, Type=%d, DimsSize=%d, Dims=[", i, out->name ? out->name : "none", out->type, out->dims->size);
+        for (int d = 0; d < out->dims->size; ++d) {
+            Serial.printf("%d%s", out->dims->data[d], (d == out->dims->size - 1) ? "" : ", ");
+        }
+        Serial.println("]");
+    }
     Serial.println("[Model] TensorFlow Lite Micro interpreter initialized successfully!");
     return true;
 }

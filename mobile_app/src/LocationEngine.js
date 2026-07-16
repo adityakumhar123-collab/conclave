@@ -442,28 +442,42 @@ class LocationEngineClass {
   estimateFamiliarity(lat, lon) {
     if (this.knownNodes.length === 0) return 0.0; // No known nodes = totally unfamiliar
 
-    let maxFamiliarity = 0.0;
-
+    // Check if inside any node's geofence radius first
     for (const node of this.knownNodes) {
       const dist = this.getHaversineDistance(
         lat, lon,
         node.center_latitude,
         node.center_longitude
       );
-
-      // Inside the geofence radius → 100% familiar
       if (dist <= node.radius) {
-        return 1.0; // Short-circuit — can't be more familiar than inside
-      }
-
-      // Outside the radius → exponential decay based on distance vs. radius
-      const fam = Math.exp(-dist / (node.radius * 2));
-      if (fam > maxFamiliarity) {
-        maxFamiliarity = fam;
+        return 1.0; // Inside geofence = 100% familiar
       }
     }
 
-    return maxFamiliarity; // Best familiarity score across all nodes
+    // Otherwise, calculate extrapolated familiarity across all known nodes
+    // Find the maximum visit count across all known nodes
+    let maxVisits = 0;
+    for (const node of this.knownNodes) {
+      const v = node.visit_count || 0;
+      if (v > maxVisits) {
+        maxVisits = v;
+      }
+    }
+    const divisor = maxVisits > 0 ? maxVisits : 1;
+
+    let sum = 0.0;
+    for (const node of this.knownNodes) {
+      const dist = this.getHaversineDistance(
+        lat, lon,
+        node.center_latitude,
+        node.center_longitude
+      );
+      const v = node.visit_count || 0;
+      const decay = Math.exp(-dist / (node.radius * 2));
+      sum += (v / divisor) * decay;
+    }
+
+    return Math.min(1.0, sum);
   }
 
   // Computes the great-circle distance (in meters) between two GPS coordinates.

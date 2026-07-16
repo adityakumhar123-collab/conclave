@@ -52,7 +52,6 @@
 // ==========================================
 #define BLE_DEVICE_NAME "SafeBand-ESP32"
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CHAR_UUID_EVENT "beb5483e-36e1-4688-b7f5-ea07361b26a8"       // Notify (Emergency)
 #define CHAR_UUID_COMMAND "c083bcf3-4c9b-44c0-9943-228ae92e8fa4"     // Write (Commands)
 #define CHAR_UUID_DEVICE_INFO "d2b781e9-4e78-43e9-92c1-d2a84e92a2a0" // Read (Device Info)
 #define CHAR_UUID_STATUS "8f1f7e34-bb52-4467-b5cc-fb5a8e03e5c9"      // Notify (Heartbeat Status)

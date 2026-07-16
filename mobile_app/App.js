@@ -107,6 +107,9 @@ export default function App() {
 
 
   const [threatScore, setThreatScore] = useState(0.05);
+  const [threatScore3s, setThreatScore3s] = useState(0.0);
+  const [threatScore3m, setThreatScore3m] = useState(0.0);
+  const [threatScore5m, setThreatScore5m] = useState(0.0);
   const [famLevel1, setFamLevel1] = useState(1.0);
   const [famLevel2, setFamLevel2] = useState(1.0);
   const [famFinal, setFamFinal] = useState(1.0);
@@ -134,11 +137,7 @@ export default function App() {
   const activeTabRef = useRef(activeTab);
   const showLogsRef = useRef(showLogs);
 
-  const currentPacketRef = useRef(currentPacket);
-  const wearConfidenceRef = useRef(wearConfidence);
 
-  currentPacketRef.current = currentPacket;
-  wearConfidenceRef.current = wearConfidence;
 
   // Keep refs synchronized
   logFilterRef.current = logFilter;
@@ -294,6 +293,11 @@ export default function App() {
     toggleStreaming,
   } = useBle(activeTab, addLog);
 
+  const currentPacketRef = useRef(currentPacket);
+  const wearConfidenceRef = useRef(wearConfidence);
+  currentPacketRef.current = currentPacket;
+  wearConfidenceRef.current = wearConfidence;
+
   const {
     contacts,
     templates,
@@ -427,17 +431,15 @@ export default function App() {
     const packetForEngine = { ...currentPacket, wearConfidence };
 
     // Compute base threat score and explanation logs
-    const { score, explanation } = computeThreatScoreDetailed(packetForEngine, {
-      familiarityScore: famFinal,
+    const { score, score3s, score3m, score5m, explanation } = computeThreatScoreDetailed(packetForEngine, {
+      cooldownActive: cooldownActive || (cooldownActiveRef && cooldownActiveRef.current)
     });
 
     let finalScore = score;
-    // Suppress threat score by 40% if the user recently cancelled an alert
-    if (cooldownActive || (cooldownActiveRef && cooldownActiveRef.current)) {
-      finalScore *= 0.6;
-    }
-
     setThreatScore(finalScore);
+    setThreatScore3s(score3s);
+    setThreatScore3m(score3m);
+    setThreatScore5m(score5m);
 
     // Logging throttle: only print to logs if score changed by at least 2%
     const scoreDelta = Math.abs(finalScore - lastLoggedScoreRef.current);
@@ -595,6 +597,9 @@ export default function App() {
             wearConfidence={wearConfidence}
             currentPacket={currentPacket}
             threatScore={threatScore}
+            threatScore3s={threatScore3s}
+            threatScore3m={threatScore3m}
+            threatScore5m={threatScore5m}
             cooldownActive={cooldownActive}
             cooldownTime={cooldownTime}
             famLevel1={famLevel1}

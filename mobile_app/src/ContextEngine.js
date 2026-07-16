@@ -1,85 +1,6 @@
 // =============================================================================
 // ContextEngine.js — Behavioral Familiarity Scoring & Threat Assessment
 // =============================================================================
-//
-// DRY RUN / ARCHITECTURE OVERVIEW
-// --------------------------------
-// ContextEngine answers the question: "Given what the wristband is detecting,
-// how dangerous is the situation — considering where the user is, what time it
-// is, and how their behavior compares to their historical baseline?"
-//
-// It has TWO distinct parts:
-//   1. ContextEngineClass.runInference()  — Computes a "familiarity score" (0–1)
-//      by comparing the current 15-minute behavioral window to historical data
-//      across 3 temporal scales:
-//        Level 1: Last 15–30 minutes (is this UNUSUAL for the current session?)
-//        Level 2: Earlier today (is this UNUSUAL for this time of day today?)
-//        Level 3: Last 7 days at this time (is this UNUSUAL historically?)
-//
-//   2. computeThreatScoreDetailed()  — Takes a BLE FEATURE/EVENT packet + the
-//      familiarity score and computes a 0.0–1.0 threat score. This score drives
-//      the Context Engine Gauge on the dashboard and the emergency alert trigger.
-//
-// WHO CALLS THIS:
-//   → App.js calls computeThreatScoreDetailed() on every FEATURE/EVENT packet
-//     (2 Hz) to update the dashboard threat gauge.
-//   → App.js may call ContextEngine.runInference() periodically or on demand
-//     for the full familiarity assessment (more expensive DB query).
-//
-// FILES USED:
-//   → Database.js for: initDatabase (direct SQL), storeInference, getIsoDateString,
-//                       getIsoTimeString
-//   → LocationEngine.js for: LocationEngine.activeVisit, LocationEngine.currentGps
-//
-// OUTPUT:
-//   → computeThreatScoreDetailed() → { score: 0.0–1.0, explanation: string[] }
-//   → getThreatLevel(score)        → { name, color, action }
-//   → ContextEngine.runInference() → { familiarityLevel1/2/3/Final, explanation[] }
-//
-// FAMILIARITY SCORE COMPUTATION (3-Level Hierarchical Comparison):
-//
-//   Each level compares the CURRENT 15-minute behavioral window (winT) against
-//   a reference window from a different time period using computeSimilarity().
-//
-//   computeSimilarity(winA, winB) returns a composite score:
-//     motionSim    = Cosine similarity of cluster_distribution dicts (0–1)
-//     locationSim  = 1.0 if same node, or exp(-dist/20m) based on GPS distance
-//     temporalSim  = Gaussian time difference × day-type match (weekday/weekend)
-//     jointSim     = motionSim × locationSim
-//     windowSim    = (motionSim + locationSim + temporalSim + jointSim) / 4.0
-//
-//   Level weights in the final familiarity score:
-//     finalFamiliarity = 0.2 × L1 + 0.3 × L2 + 0.5 × L3
-//     (Historical 7-day similarity is weighted most heavily — most reliable signal)
-//
-// THREAT SCORE PIPELINE (computeThreatScoreDetailed):
-//   1. Normalize anomaly MAE score against the calibrated threshold (1.01309)
-//   2. Apply pattern weight based on motion state bitmask:
-//      - High-Impact + linear fall (eigenvalue > 700) → 0.80 weight
-//      - Aperiodic + long duration (> 8s) + high accel (> 1400mg) → 0.75 weight (struggle)
-//      - Periodic + low spectral entropy → 0.70 weight (seizure-like)
-//      - Restrained + long stillness → 0.65 weight (pinned/restrained)
-//      - Walking/still → 0.20–0.40 weight (normal range)
-//   3. Apply duration factor: short burst (< 1.5s) = low weight, sustained (> 12s) = high
-//   4. Add +0.15 if anomalous AND suddenly still (post-fall collapse detection)
-//   5. Modulate by familiarity: unfamiliar location amplifies threat, familiar dampens
-//      formula: threatScore × (1.3 - 0.6 × familiarityScore)
-//   6. Apply wear confidence penalty: < 40% confidence → suppress to 0 (device removed)
-//   7. Clamp to [0.0, 1.0]
-//
-// BUGS / NOTES:
-//   ⚠ computeThreatScoreDetailed() comment block numbers its steps as 1,2,3,4,7
-//     (skipping 5 and 6). This suggests steps 5 and 6 were removed during
-//     development but the numbering was not updated. Minor cosmetic issue.
-//   ⚠ getLocationNodeIdAt() calls initDatabase() on every invocation. Since
-//     initDatabase() is idempotent (returns cached db after first call), this is
-//     safe but adds a tiny overhead for every location lookup.
-//   ⚠ Level 3 historical comparison fetches ALL observations from the last 7 days
-//     at the matching time window across ALL past dates. If the user has used the
-//     device for many months, this query could return many rows. The groupByDate
-//     logic then runs N DB queries (one per unique date). For large datasets this
-//     could become slow. A pre-aggregated summary table would be more efficient.
-// =============================================================================
 
 import {
   initDatabase,
@@ -87,13 +8,16 @@ import {
   getIsoTimeString
 } from './Database.js';
 import { LocationEngine } from './LocationEngine.js';
-
+import { MotionEngine } from './MotionEngine.js';
 
 // Helper: Convert time string "HH:MM:SS" to seconds since midnight
 export function timeStrToSeconds(tStr) {
   if (!tStr) return 0;
-  const [h, m, s] = tStr.split(':').map(Number);
-  return h * 3600 + m * 60 + (s || 0);
+  const parts = tStr.split(':').map(Number);
+  const h = parts[0] || 0;
+  const m = parts[1] || 0;
+  const s = parts[2] || 0;
+  return h * 3600 + m * 60 + s;
 }
 
 // Helper: Convert seconds since midnight to "HH:MM:SS" time string
@@ -103,12 +27,6 @@ export function secondsToTimeStr(sec) {
   const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
-
-// Helper: Determine weekday/weekend day classification
-export function getDayType(dateStr) {
-  const day = new Date(dateStr).getDay();
-  return (day === 0 || day === 6) ? 'WEEKEND' : 'WEEKDAY';
 }
 
 // Helper: Calculate Haversine distance in meters
@@ -130,37 +48,18 @@ export function getHaversineDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// Helper: Query Location Visit Node ID at specific date & time
-export function getLocationNodeIdAt(dateStr, timeStr) {
-  try {
-    const db = initDatabase();
-    const row = db.getFirstSync(`
-      SELECT location_node_id FROM location_visits
-      WHERE (enter_date < ? OR (enter_date = ? AND enter_time <= ?))
-        AND (exit_date IS NULL OR exit_date > ? OR (exit_date = ? AND exit_time >= ?))
-      ORDER BY enter_date DESC, enter_time DESC
-      LIMIT 1;
-    `, [dateStr, dateStr, timeStr, dateStr, dateStr, timeStr]);
-    return row ? row.location_node_id : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-// 1. Context Window Construction
-export function buildContextWindow(dateStr, timeStr, windowSizeMinutes = 15, locationNodeId = null, gpsCoords = null) {
-  const db = initDatabase();
+// Fetch observations for a window size (in seconds) ending at timeStr on dateStr
+export function fetchWindowObservations(db, dateStr, timeStr, windowSizeSec) {
   const targetSec = timeStrToSeconds(timeStr);
-  const startSec = targetSec - windowSizeMinutes * 60;
-
-  let rawObs = [];
+  const startSec = targetSec - windowSizeSec;
+  let rows = [];
   try {
     if (startSec >= 0) {
       const startT = secondsToTimeStr(startSec);
-      rawObs = db.getAllSync(`
+      rows = db.getAllSync(`
         SELECT * FROM observations 
         WHERE date = ? AND time >= ? AND time <= ?
-        ORDER BY date ASC, time ASC;
+        ORDER BY time ASC;
       `, [dateStr, startT, timeStr]);
     } else {
       // Cross midnight boundary
@@ -171,170 +70,204 @@ export function buildContextWindow(dateStr, timeStr, windowSizeMinutes = 15, loc
       const rowsPrev = db.getAllSync(`
         SELECT * FROM observations 
         WHERE date = ? AND time >= ?
-        ORDER BY date ASC, time ASC;
+        ORDER BY time ASC;
       `, [prevDateStr, startT]);
 
       const rowsToday = db.getAllSync(`
         SELECT * FROM observations 
         WHERE date = ? AND time <= ?
-        ORDER BY date ASC, time ASC;
+        ORDER BY time ASC;
       `, [dateStr, timeStr]);
 
-      rawObs = [...rowsPrev, ...rowsToday];
+      rows = [...rowsPrev, ...rowsToday];
     }
   } catch (e) {
-    console.warn('[ContextEngine] Failed to build context window observations:', e);
+    console.warn(`[ContextEngine] fetchWindowObservations failed for ${dateStr} at ${timeStr}:`, e);
   }
 
-  const parsedObs = rawObs.map(row => ({
-    ...row,
-    cluster_distribution: typeof row.cluster_distribution === 'string' ? JSON.parse(row.cluster_distribution) : row.cluster_distribution,
-    motion_features: typeof row.motion_features === 'string' ? JSON.parse(row.motion_features) : row.motion_features
+  return rows.map(r => ({
+    ...r,
+    cluster_distribution: typeof r.cluster_distribution === 'string' ? JSON.parse(r.cluster_distribution) : r.cluster_distribution,
+    reconstruction_scores: typeof r.reconstruction_scores === 'string' ? JSON.parse(r.reconstruction_scores) : r.reconstruction_scores,
+    embeddings: typeof r.embeddings === 'string' ? JSON.parse(r.embeddings) : r.embeddings,
+    motion_features: typeof r.motion_features === 'string' ? JSON.parse(r.motion_features) : r.motion_features
   }));
-
-  // Compile average motion distribution
-  const avgDistribution = {};
-  if (parsedObs.length > 0) {
-    const keys = new Set();
-    parsedObs.forEach(obs => {
-      if (obs.cluster_distribution) {
-        Object.keys(obs.cluster_distribution).forEach(k => keys.add(k));
-      }
-    });
-    for (const key of keys) {
-      let sum = 0;
-      parsedObs.forEach(obs => {
-        sum += obs.cluster_distribution[key] || 0.0;
-      });
-      avgDistribution[key] = sum / parsedObs.length;
-    }
-  }
-
-  // Resolve location node
-  let resolvedNodeId = locationNodeId;
-  if (resolvedNodeId === null) {
-    resolvedNodeId = getLocationNodeIdAt(dateStr, timeStr);
-  }
-
-  return {
-    date: dateStr,
-    time: timeStr,
-    observations: parsedObs,
-    avgDistribution,
-    locationNodeId: resolvedNodeId,
-    gpsCoords
-  };
 }
 
-// 2. Motion Cosine Similarity
-export function getMotionSimilarity(p1, p2) {
-  const keys = new Set([...Object.keys(p1 || {}), ...Object.keys(p2 || {})]);
-  if (keys.size === 0) return 1.0;
+// Helper: Extract flat arrays of scores, embeddings, and RMS values from observations list
+export function extractArraysFromObservations(observations) {
+  const scores = [];
+  const embeddings = [];
+  const rmsValues = [];
 
-  let dotProduct = 0.0;
+  observations.forEach(obs => {
+    const obsScores = obs.reconstruction_scores || [];
+    const obsEmbeddings = obs.embeddings || [];
+    const obsFeatures = obs.motion_features || [];
+
+    scores.push(...obsScores);
+    embeddings.push(...obsEmbeddings);
+    obsFeatures.forEach(feat => {
+      let rms = 0;
+      if (feat.twelveFeatures && feat.twelveFeatures.length > 1) {
+        rms = feat.twelveFeatures[1];
+      } else {
+        rms = (feat.peakAccel || 0) / 101.97162;
+      }
+      rmsValues.push(rms);
+    });
+  });
+
+  return { scores, embeddings, rmsValues };
+}
+
+// Compute Non-History Metrics (Drift, Intensity, Volatility, Persistence, Average Anomaly)
+export function computeNonHistoryMetrics(scores, embeddings, rmsValues) {
+  if (scores.length === 0) {
+    return { A_norm: 0, D_norm: 0, I_norm: 0, V_norm: 0, P_norm: 0, score: 0 };
+  }
+  const meanAnomaly = scores.reduce((a, b) => a + b, 0) / scores.length;
+  const A_norm = Math.min(1.0, Math.max(0.0, meanAnomaly / 1.1214));
+
+  let driftSum = 0;
+  let driftCount = 0;
+  for (let i = 0; i < embeddings.length - 1; i++) {
+    const e1 = embeddings[i];
+    const e2 = embeddings[i+1];
+    if (e1 && e2) {
+      let sumSq = 0;
+      for (let j = 0; j < 16; j++) {
+        const diff = e1[j] - e2[j];
+        sumSq += diff * diff;
+      }
+      driftSum += Math.sqrt(sumSq);
+      driftCount++;
+    }
+  }
+  const avgDrift = driftCount > 0 ? driftSum / driftCount : 0.0;
+  const D_norm = Math.min(1.0, Math.max(0.0, avgDrift / 5.0));
+
+  const meanRms = rmsValues.reduce((a, b) => a + b, 0) / rmsValues.length;
+  const I_norm = Math.min(1.0, Math.max(0.0, meanRms / 2.0));
+
+  let variance = 0.0;
+  if (rmsValues.length > 1) {
+    const sqDiffSum = rmsValues.reduce((sum, val) => sum + (val - meanRms) ** 2, 0);
+    variance = sqDiffSum / (rmsValues.length - 1);
+  }
+  const V_norm = Math.min(1.0, Math.max(0.0, variance / 1.5));
+
+  const persistentCount = scores.filter(s => s > 1.01309).length;
+  const P_norm = persistentCount / scores.length;
+
+  const score = 0.20 * A_norm + 0.20 * D_norm + 0.15 * I_norm + 0.25 * V_norm + 0.20 * P_norm;
+
+  return { A_norm, D_norm, I_norm, V_norm, P_norm, score };
+}
+
+// Bhattacharyya Coefficient between discrete probability distributions
+export function computeBhattacharyya(p, q) {
+  const keys = new Set([...Object.keys(p || {}), ...Object.keys(q || {})]);
+  let sum = 0.0;
+  for (const key of keys) {
+    const valP = p[key] || 0.0;
+    const valQ = q[key] || 0.0;
+    sum += Math.sqrt(valP * valQ);
+  }
+  return sum;
+}
+
+// Resolve dominant cluster key of an observation
+export function getDominantCluster(obs) {
+  if (!obs || !obs.cluster_distribution) return null;
+  let maxVal = -1;
+  let dominantKey = null;
+  for (const [key, val] of Object.entries(obs.cluster_distribution)) {
+    if (val > maxVal) {
+      maxVal = val;
+      dominantKey = key;
+    }
+  }
+  return dominantKey;
+}
+
+// Dom cluster sequence similarity
+export function computeSequenceSimilarity(seqCurr, seqHist) {
+  const N = Math.min(seqCurr.length, seqHist.length);
+  if (N === 0) return 0.0;
+  let matches = 0;
+  for (let i = 1; i <= N; i++) {
+    if (seqCurr[seqCurr.length - i] === seqHist[seqHist.length - i]) {
+      matches++;
+    }
+  }
+  return matches / N;
+}
+
+// Cosine Similarity helper
+export function cosineSimilarity(a, b) {
+  let dot = 0.0;
   let normA = 0.0;
   let normB = 0.0;
-
-  for (const key of keys) {
-    const valA = p1[key] || 0.0;
-    const valB = p2[key] || 0.0;
-    dotProduct += valA * valB;
-    normA += valA * valA;
-    normB += valB * valB;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
   }
-
-  if (normA === 0.0 && normB === 0.0) return 1.0;
   if (normA === 0.0 || normB === 0.0) return 0.0;
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-// 3. Location Similarity with decay
-export function getLocationSimilarity(nodeAId, gpsA, nodeBId, gpsB) {
-  if (nodeAId !== null && nodeBId !== null && nodeAId === nodeBId) {
-    return 1.0;
-  }
+// Compile a 48-dimensional summary vector (mean, std, min, max of 12 features) over observations
+export function computeSummary48D(observations) {
+  const summaries = [];
+  const featureLists = Array.from({ length: 12 }, () => []);
 
-  let latA = gpsA ? gpsA.latitude : null;
-  let lonA = gpsA ? gpsA.longitude : null;
-  let latB = gpsB ? gpsB.latitude : null;
-  let lonB = gpsB ? gpsB.longitude : null;
-
-  try {
-    const db = initDatabase();
-    if (nodeAId !== null && (latA === null || lonA === null)) {
-      const nodeA = db.getFirstSync('SELECT center_latitude, center_longitude FROM location_nodes WHERE location_node_id = ?;', [nodeAId]);
-      if (nodeA) {
-        latA = nodeA.center_latitude;
-        lonA = nodeA.center_longitude;
+  observations.forEach(obs => {
+    const obsFeatures = obs.motion_features || [];
+    obsFeatures.forEach(feat => {
+      let vector = feat.twelveFeatures;
+      if (!vector || vector.length < 12) {
+        vector = [
+          0, (feat.peakAccel || 0) / 101.97162, 0, 0,
+          (feat.zcr || 0) / 255.0, (feat.dominantFreq || 0), (feat.spectralEntropy || 0) / 255.0,
+          0, 0, (feat.eigenvalueRatio || 0) / 1000.0, 0, 0
+        ];
       }
-    }
-    if (nodeBId !== null && (latB === null || lonB === null)) {
-      const nodeB = db.getFirstSync('SELECT center_latitude, center_longitude FROM location_nodes WHERE location_node_id = ?;', [nodeBId]);
-      if (nodeB) {
-        latB = nodeB.center_latitude;
-        lonB = nodeB.center_longitude;
+      for (let i = 0; i < 12; i++) {
+        featureLists[i].push(vector[i] || 0.0);
       }
+    });
+  });
+
+  for (let i = 0; i < 12; i++) {
+    const list = featureLists[i];
+    if (list.length === 0) {
+      summaries.push(0, 0, 0, 0);
+      continue;
     }
-  } catch (e) {
-    // Fail silently, fallback below
+    const sum = list.reduce((a, b) => a + b, 0);
+    const mean = sum / list.length;
+    const min = Math.min(...list);
+    const max = Math.max(...list);
+    const sqDiffSum = list.reduce((a, b) => a + (b - mean) ** 2, 0);
+    const std = Math.sqrt(sqDiffSum / list.length);
+
+    summaries.push(mean, std, min, max);
   }
 
-  if (latA !== null && lonA !== null && latB !== null && lonB !== null) {
-    const dist = getHaversineDistance(latA, lonA, latB, lonB);
-    return Math.exp(-dist / 20.0); // decay distance scale is 20m
-  }
-
-  return 0.5; // Fallback
-}
-
-// 4. Temporal Similarity
-export function getTemporalSimilarity(timeA, dateA, timeB, dateB) {
-  // Gaussian time difference similarity
-  const secA = timeStrToSeconds(timeA);
-  const secB = timeStrToSeconds(timeB);
-  let diffSec = Math.abs(secA - secB);
-  if (diffSec > 43200) {
-    diffSec = 86400 - diffSec;
-  }
-
-  const sigma = 900.0; // 15 minutes tolerance
-  const timeSim = Math.exp(-(diffSec * diffSec) / (2 * sigma * sigma));
-
-  // Day type similarity
-  const typeA = getDayType(dateA);
-  const typeB = getDayType(dateB);
-
-  let daySim = 1.0;
-  if (typeA === 'WEEKDAY' && typeB === 'WEEKEND') {
-    daySim = 0.8;
-  } else if (typeA === 'WEEKEND' && typeB === 'WEEKDAY') {
-    daySim = 0.6;
-  }
-
-  return timeSim * daySim;
-}
-
-// 5. Context Window Comparison
-export function computeSimilarity(winA, winB) {
-  const motionSim = getMotionSimilarity(winA.avgDistribution, winB.avgDistribution);
-  const locationSim = getLocationSimilarity(winA.locationNodeId, winA.gpsCoords, winB.locationNodeId, winB.gpsCoords);
-  const temporalSim = getTemporalSimilarity(winA.time, winA.date, winB.time, winB.date);
-  const jointSim = motionSim * locationSim;
-
-  const windowSim = (motionSim + locationSim + temporalSim + jointSim) / 4.0;
-
-  return {
-    motionSim,
-    locationSim,
-    temporalSim,
-    jointSim,
-    windowSim
-  };
+  return summaries;
 }
 
 class ContextEngineClass {
   constructor() {
     this.logs = [];
+    this.cachedHist3s = 0.0;
+    this.cachedHist3m = 0.0;
+    this.cachedHist5m = 0.0;
+    this.cachedFinal3m = 0.0;
+    this.cachedFinal5m = 0.0;
+    this.hasHistoryData = false;
   }
 
   runInference(packet, gpsCoords = null, overrideDate = null, overrideTime = null) {
@@ -344,170 +277,196 @@ class ContextEngineClass {
 
     this.logs.push(`Assessment started at ${dateStr} ${timeStr}`);
 
-    // Resolve location
-    let locationNodeId = null;
-    if (LocationEngine.activeVisit) {
-      locationNodeId = LocationEngine.activeVisit.location_node_id;
+    const db = initDatabase();
+
+    // 1. Fetch current observations of the last 5 minutes (300 seconds)
+    const currentWindowObs = fetchWindowObservations(db, dateStr, timeStr, 300);
+    if (currentWindowObs.length === 0) {
+      this.logs.push("No current observations in SQLite. Skipping history calculation.");
+      return {
+        familiarityLevel1: 0.0,
+        familiarityLevel2: 0.0,
+        familiarityLevel3: 0.0,
+        familiarityFinal: 0.0,
+        explanation: this.logs
+      };
     }
 
-    // 1. Build Current Context Window
-    const winT = buildContextWindow(dateStr, timeStr, 15, locationNodeId, gpsCoords || LocationEngine.currentGps);
-    this.logs.push(`Built current window: ${winT.observations.length} observations.`);
+    this.logs.push(`Retrieved ${currentWindowObs.length} current observations in the 5m window.`);
 
-    // 2. Compute Level 1 Familiarity (Active Session window compared to 15-30 mins ago)
-    let level1 = 1.0;
-    const prevTimeSec = timeStrToSeconds(timeStr) - 15 * 60;
-    const prevTimeStr = secondsToTimeStr(prevTimeSec);
-    const winPrev = buildContextWindow(dateStr, prevTimeStr, 15, null, null);
+    // Extract window lists
+    const targetSec = timeStrToSeconds(timeStr);
+    const win3sObs = currentWindowObs.filter(o => targetSec - timeStrToSeconds(o.time) <= 3);
+    const win3mObs = currentWindowObs.filter(o => targetSec - timeStrToSeconds(o.time) <= 180);
+    const win5mObs = currentWindowObs;
 
-    if (winPrev.observations.length > 0) {
-      const sim = computeSimilarity(winT, winPrev);
-      level1 = sim.windowSim;
-      this.logs.push(`Level 1 (Session) comparison with preceding window: ${level1.toFixed(3)}`);
-    } else {
-      this.logs.push(`Level 1 (Session): No preceding window, defaulted to 1.0`);
-    }
+    // Get location coordinates for Location Familiarity
+    const lat = gpsCoords ? gpsCoords.latitude : (LocationEngine.currentGps ? LocationEngine.currentGps.latitude : null);
+    const lon = gpsCoords ? gpsCoords.longitude : (LocationEngine.currentGps ? LocationEngine.currentGps.longitude : null);
+    const locFam = (lat !== null && lon !== null) ? LocationEngine.estimateFamiliarity(lat, lon) : 0.0;
+    this.logs.push(`On-demand Location Familiarity computed: ${locFam.toFixed(3)}`);
 
-    // 3. Compute Level 2 Familiarity (Earlier windows today)
-    let level2 = 1.0;
-    const earlierObs = [];
-    try {
-      const db = initDatabase();
-      const limitTime = secondsToTimeStr(timeStrToSeconds(timeStr) - 15 * 60);
-      const rows = db.getAllSync(`
-        SELECT * FROM observations 
-        WHERE date = ? AND time < ?
-        ORDER BY time ASC;
-      `, [dateStr, limitTime]);
+    // Calculate dates list for history
+    const dateToday = new Date(dateStr);
+    const datesHistory = [
+      getIsoDateString(new Date(dateToday.getTime() - 86400000)),       // D-1
+      getIsoDateString(new Date(dateToday.getTime() - 86400000 * 7)),   // D-7
+      getIsoDateString(new Date(dateToday.getTime() - 86400000 * 15))  // D-15
+    ];
 
-      rows.forEach(r => {
-        earlierObs.push({
-          ...r,
-          cluster_distribution: JSON.parse(r.cluster_distribution),
-          motion_features: JSON.parse(r.motion_features)
-        });
-      });
-    } catch (e) {
-      // Ignore
-    }
+    // Windows mapping for calculations
+    const windows = [
+      { name: '3s', obs: win3sObs, duration: 3 },
+      { name: '3m', obs: win3mObs, duration: 180 },
+      { name: '5m', obs: win5mObs, duration: 300 }
+    ];
 
-    if (earlierObs.length >= 10) {
-      // segment into non-overlapping 15m intervals
-      const blocks = [];
-      let currentBlock = [];
-      let lastSec = -1;
+    const results = {};
+    let validHistFoundTotal = false;
 
-      for (const obs of earlierObs) {
-        const oSec = timeStrToSeconds(obs.time);
-        if (lastSec === -1 || oSec - lastSec < 15 * 60) {
-          currentBlock.push(obs);
-        } else {
-          blocks.push(currentBlock);
-          currentBlock = [obs];
-        }
-        lastSec = oSec;
-      }
-      if (currentBlock.length > 0) blocks.push(currentBlock);
+    windows.forEach(w => {
+      // Current non-history score
+      const currentArrays = extractArraysFromObservations(w.obs);
+      const nonHistResult = computeNonHistoryMetrics(currentArrays.scores, currentArrays.embeddings, currentArrays.rmsValues);
+      const S_non_hist = nonHistResult.score;
 
-      let sumSim = 0.0;
-      let count = 0;
-      blocks.forEach(block => {
-        if (block.length > 0) {
-          const winBlock = buildContextWindow(dateStr, block[block.length - 1].time, 15, null, null);
-          const sim = computeSimilarity(winT, winBlock);
-          sumSim += sim.windowSim;
-          count++;
-        }
-      });
-
-      if (count > 0) {
-        level2 = sumSim / count;
-        this.logs.push(`Level 2 (Today): Evaluated ${count} earlier blocks. Average Similarity: ${level2.toFixed(3)}`);
-      }
-    } else {
-      this.logs.push(`Level 2 (Today): Insufficient earlier data today, defaulted to 1.0`);
-    }
-
-    // 4. Compute Level 3 Familiarity (Historical 30-day temporal window matching)
-    let level3 = 0.5; // neutral fallback
-    const histObs = [];
-    try {
-      const db = initDatabase();
-      const targetSec = timeStrToSeconds(timeStr);
-      const startSec = targetSec - 15 * 60;
-      const endSec = targetSec + 15 * 60;
-
-      let rows = [];
-      if (startSec < 0) {
-        rows = db.getAllSync(`
-          SELECT * FROM observations 
-          WHERE date < ? AND (time >= ? OR time <= ?)
-          ORDER BY date ASC, time ASC;
-        `, [dateStr, secondsToTimeStr(86400 + startSec), secondsToTimeStr(endSec)]);
-      } else if (endSec >= 86400) {
-        rows = db.getAllSync(`
-          SELECT * FROM observations 
-          WHERE date < ? AND (time >= ? OR time <= ?)
-          ORDER BY date ASC, time ASC;
-        `, [dateStr, secondsToTimeStr(startSec), secondsToTimeStr(endSec - 86400)]);
+      // Current distribution
+      let currDist = {};
+      if (w.name === '3s') {
+        currDist = w.obs.length > 0 ? w.obs[w.obs.length - 1].cluster_distribution : {};
       } else {
-        rows = db.getAllSync(`
-          SELECT * FROM observations 
-          WHERE date < ? AND time >= ? AND time <= ?
-          ORDER BY date ASC, time ASC;
-        `, [dateStr, secondsToTimeStr(startSec), secondsToTimeStr(endSec)]);
+        const keys = new Set();
+        w.obs.forEach(o => {
+          if (o.cluster_distribution) Object.keys(o.cluster_distribution).forEach(k => keys.add(k));
+        });
+        keys.forEach(k => {
+          const sum = w.obs.reduce((a, b) => a + (b.cluster_distribution[k] || 0.0), 0);
+          currDist[k] = sum / w.obs.length;
+        });
       }
 
-      rows.forEach(r => {
-        histObs.push({
-          ...r,
-          cluster_distribution: JSON.parse(r.cluster_distribution),
-          motion_features: JSON.parse(r.motion_features)
-        });
-      });
-    } catch (e) {
-      // Ignore
-    }
+      // Dominant cluster sequence
+      const seqCurr = w.obs.map(o => getDominantCluster(o)).filter(c => c !== null);
 
-    // Group by unique date
-    const groupedHist = {};
-    histObs.forEach(obs => {
-      if (!groupedHist[obs.date]) groupedHist[obs.date] = [];
-      groupedHist[obs.date].push(obs);
+      // Fetch history windows
+      const historyWindows = [];
+      datesHistory.forEach(hDate => {
+        const obsHist = fetchWindowObservations(db, hDate, timeStr, w.duration);
+        if (obsHist.length > 0) {
+          historyWindows.push({ date: hDate, obs: obsHist });
+        }
+      });
+
+      let S_hist = 0.0;
+
+      if (historyWindows.length > 0) {
+        validHistFoundTotal = true;
+
+        // Bhattacharyya Similarity
+        let sumBC = 0.0;
+        historyWindows.forEach(hw => {
+          let histDist = {};
+          if (w.name === '3s') {
+            histDist = hw.obs[hw.obs.length - 1].cluster_distribution || {};
+          } else {
+            const keys = new Set();
+            hw.obs.forEach(o => {
+              if (o.cluster_distribution) Object.keys(o.cluster_distribution).forEach(k => keys.add(k));
+            });
+            keys.forEach(k => {
+              const sum = hw.obs.reduce((a, b) => a + (b.cluster_distribution[k] || 0.0), 0);
+              histDist[k] = sum / hw.obs.length;
+            });
+          }
+          sumBC += computeBhattacharyya(currDist, histDist);
+        });
+        const BC_avg = sumBC / historyWindows.length;
+
+        // Sequence Similarity
+        let sumSeq = 0.0;
+        historyWindows.forEach(hw => {
+          const seqHist = hw.obs.map(o => getDominantCluster(o)).filter(c => c !== null);
+          sumSeq += computeSequenceSimilarity(seqCurr, seqHist);
+        });
+        const Seq_sim = sumSeq / historyWindows.length;
+
+        // Features Similarity
+        let Feat_sim = 0.0;
+        if (w.name === '3s') {
+          const allHistObs = [];
+          historyWindows.forEach(hw => allHistObs.push(...hw.obs));
+          
+          const get12D = (obs) => {
+            const feat = obs.motion_features ? obs.motion_features[0] : null;
+            if (feat && feat.twelveFeatures && feat.twelveFeatures.length >= 12) {
+              return feat.twelveFeatures;
+            }
+            return [
+              0, (feat ? (feat.peakAccel || 0) / 101.97162 : 0), 0, 0,
+              (feat ? (feat.zcr || 0) / 255.0 : 0), (feat ? (feat.dominantFreq || 0) : 0), (feat ? (feat.spectralEntropy || 0) / 255.0 : 0),
+              0, 0, (feat ? (feat.eigenvalueRatio || 0) / 1000.0 : 0), 0, 0
+            ];
+          };
+
+          const currVec12D = w.obs.length > 0 ? get12D(w.obs[w.obs.length - 1]) : Array(12).fill(0);
+          const histVecs12D = allHistObs.map(o => get12D(o));
+
+          if (histVecs12D.length > 0) {
+            const means = Array(12).fill(0);
+            for (let i = 0; i < 12; i++) {
+              means[i] = histVecs12D.reduce((sum, vec) => sum + (vec[i] || 0.0), 0) / histVecs12D.length;
+            }
+            const stds = Array(12).fill(0);
+            for (let i = 0; i < 12; i++) {
+              const sqDiff = histVecs12D.reduce((sum, vec) => sum + ((vec[i] || 0.0) - means[i]) ** 2, 0);
+              stds[i] = Math.sqrt(sqDiff / histVecs12D.length);
+            }
+
+            const normCurr = currVec12D.map((v, i) => (v - means[i]) / (stds[i] + 1e-6));
+            const normHists = histVecs12D.map(vec => vec.map((v, i) => (v - means[i]) / (stds[i] + 1e-6)));
+
+            let simSum = 0;
+            normHists.forEach(nHist => {
+              simSum += cosineSimilarity(normCurr, nHist);
+            });
+            Feat_sim = simSum / normHists.length;
+          }
+        } else {
+          const currSummary = computeSummary48D(w.obs);
+          let sumCos = 0.0;
+          historyWindows.forEach(hw => {
+            const histSummary = computeSummary48D(hw.obs);
+            sumCos += cosineSimilarity(currSummary, histSummary);
+          });
+          Feat_sim = sumCos / historyWindows.length;
+        }
+
+        S_hist = 1.0 - (0.30 * BC_avg + 0.25 * Seq_sim + 0.25 * Feat_sim + 0.20 * locFam);
+        this.logs.push(`Window ${w.name}: S_hist=${S_hist.toFixed(3)} (BC=${BC_avg.toFixed(2)}, Seq=${Seq_sim.toFixed(2)}, Feat=${Feat_sim.toFixed(2)})`);
+      } else {
+        S_hist = 0.0;
+        this.logs.push(`Window ${w.name}: No baseline history found. S_hist forced to 0.0`);
+      }
+
+      const S_final_W = 0.70 * S_non_hist + 0.30 * S_hist;
+      results[w.name] = { S_non_hist, S_hist, S_final_W };
     });
 
-    const dates = Object.keys(groupedHist);
-    if (dates.length > 0) {
-      let sumSim = 0.0;
-      let count = 0;
+    this.cachedHist3s = results['3s'].S_hist;
+    this.cachedHist3m = results['3m'].S_hist;
+    this.cachedHist5m = results['5m'].S_hist;
+    this.cachedFinal3m = results['3m'].S_final_W;
+    this.cachedFinal5m = results['5m'].S_final_W;
+    this.hasHistoryData = validHistFoundTotal;
 
-      dates.forEach(d => {
-        const obsList = groupedHist[d];
-        if (obsList.length > 0) {
-          const winHist = buildContextWindow(d, obsList[obsList.length - 1].time, 15, null, null);
-          const sim = computeSimilarity(winT, winHist);
-          sumSim += sim.windowSim;
-          count++;
-        }
-      });
-
-      if (count > 0) {
-        level3 = sumSim / count;
-        this.logs.push(`Level 3 (7 Days): Evaluated ${count} historical days. Average Similarity: ${level3.toFixed(3)}`);
-      }
-    } else {
-      this.logs.push(`Level 3 (7 Days): No historical matching time windows, defaulted to 0.5`);
-    }
-
-    // 5. Fuse final familiarity score
-    const finalFamiliarity = 0.2 * level1 + 0.3 * level2 + 0.5 * level3;
-    this.logs.push(`Final Familiarity Score Fused: ${finalFamiliarity.toFixed(3)} (L1: ${level1.toFixed(2)}, L2: ${level2.toFixed(2)}, L3: ${level3.toFixed(2)})`);
+    const S_final = (results['3s'].S_final_W + results['3m'].S_final_W + results['5m'].S_final_W) / 3.0;
+    this.logs.push(`ContextEngine Tick: Fused S_final = ${S_final.toFixed(3)} (3s: ${results['3s'].S_final_W.toFixed(2)}, 3m: ${results['3m'].S_final_W.toFixed(2)}, 5m: ${results['5m'].S_final_W.toFixed(2)})`);
 
     return {
-      familiarityLevel1: level1,
-      familiarityLevel2: level2,
-      familiarityLevel3: level3,
-      familiarityFinal: finalFamiliarity,
+      familiarityLevel1: results['3s'].S_final_W,
+      familiarityLevel2: results['3m'].S_final_W,
+      familiarityLevel3: results['5m'].S_final_W,
+      familiarityFinal: S_final,
       explanation: this.logs
     };
   }
@@ -515,102 +474,71 @@ class ContextEngineClass {
 
 export const ContextEngine = new ContextEngineClass();
 
-// Standard threat assessment API mapping to Mobile Dashboard UI
 export function computeThreatScoreDetailed(packet, contextConfig = {}) {
   const logs = [];
-  const {
-    familiarityScore = 1.0, // default familiarity keeps threat score down
-  } = contextConfig;
 
-  // 1. Base Motion Evidence
-  const normalizedScore = packet.anomalyScore / 1.01309; // 1.01309 is the trigger threshold (DEFAULT_THRESHOLD)
-  logs.push(`Raw anomaly score: ${packet.anomalyScore.toFixed(3)} (Normalized: ${normalizedScore.toFixed(3)})`);
+  const buffer = MotionEngine.buffer || [];
+  const packets = [...buffer];
+  if (packets.length === 0 || packets[packets.length - 1].sequenceId !== packet.sequenceId) {
+    packets.push(packet);
+  }
+  if (packets.length > 10) packets.shift();
 
-  let patternWeight = 0.40;
-  let patternName = 'UNKNOWN';
-  const isStill = (packet.motionState & (1 << 0)) !== 0;
-  const isPeriodic = (packet.motionState & (1 << 1)) !== 0;
-  const isAperiodic = (packet.motionState & (1 << 2)) !== 0;
-  const isHighImpact = (packet.motionState & (1 << 3)) !== 0;
-  const isRestrained = (packet.motionState & (1 << 4)) !== 0;
+  const scores = packets.map(p => p.anomalyScore);
+  const embeddings = packets.map(p => p.motionEmbedding);
+  const rmsValues = packets.map(p => {
+    if (p.twelveFeatures && p.twelveFeatures.length > 1) {
+      return p.twelveFeatures[1];
+    }
+    return (p.peakAccel || 0) / 101.97162;
+  });
 
-  if (isHighImpact && packet.eigenvalueRatio > 700) {
-    patternWeight = 0.80;
-    patternName = 'FALL_CANDIDATE';
-  } else if (isAperiodic && !isHighImpact && packet.anomalyDuration > 80 && packet.peakAccel > 1400) {
-    patternWeight = 0.75;
-    patternName = 'STRUGGLE_CANDIDATE';
-  } else if (isPeriodic && packet.spectralEntropy < 100) {
-    patternWeight = 0.70;
-    patternName = 'SEIZURE_CANDIDATE';
-  } else if (isRestrained || (isStill && packet.anomalyDuration > 50)) {
-    patternWeight = 0.65;
-    patternName = 'PINNED_CANDIDATE';
-  } else if (isStill) {
-    patternWeight = 0.20;
-    patternName = 'STILL';
-  } else if (isPeriodic) {
-    patternWeight = 0.30;
-    patternName = 'PERIODIC';
-  } else if (isAperiodic) {
-    patternWeight = 0.40;
-    patternName = 'APERIODIC';
+  const nonHistResult = computeNonHistoryMetrics(scores, embeddings, rmsValues);
+  const S_non_hist_3s = nonHistResult.score;
+
+  logs.push(`Real-time 3s Non-History Score: ${S_non_hist_3s.toFixed(3)}`);
+  logs.push(`  Anomaly: ${nonHistResult.A_norm.toFixed(2)}, Drift: ${nonHistResult.D_norm.toFixed(2)}, Intensity: ${nonHistResult.I_norm.toFixed(2)}, Volatility: ${nonHistResult.V_norm.toFixed(2)}, Persistence: ${nonHistResult.P_norm.toFixed(2)}`);
+
+  const S_hist_3s = ContextEngine.cachedHist3s;
+  let S_final_3s = 0.70 * S_non_hist_3s + 0.30 * S_hist_3s;
+
+  let S_final_3m = ContextEngine.cachedFinal3m;
+  let S_final_5m = ContextEngine.cachedFinal5m;
+
+  if (!ContextEngine.hasHistoryData) {
+    S_final_3s = 0.70 * S_non_hist_3s;
+    if (S_final_3m === 0) S_final_3m = 0.70 * S_non_hist_3s;
+    if (S_final_5m === 0) S_final_5m = 0.70 * S_non_hist_3s;
   }
 
-  logs.push(`Motion State Mask: 0x${packet.motionState.toString(16).toUpperCase()} (${patternName}), weight: ${patternWeight}`);
+  let S_final = (S_final_3s + S_final_3m + S_final_5m) / 3.0;
 
-  let threatScore = normalizedScore * patternWeight;
-  logs.push(`Base threat score: ${threatScore.toFixed(3)}`);
-
-  // 2. Anomaly Duration
-  const durationSec = packet.anomalyDuration * 0.1;
-  const scoreConfidence = packet.anomalyScore / 1.1265;
-  const minDurationFactor = scoreConfidence * 0.55;
-
-  let durationFactor = minDurationFactor;
-  if (durationSec < 1.5) {
-    durationFactor = Math.max(minDurationFactor, 0.10);
-  } else if (durationSec < 3.0) {
-    durationFactor = Math.max(minDurationFactor, 0.35);
-  } else if (durationSec < 6.0) {
-    durationFactor = Math.max(minDurationFactor, 0.60);
-  } else if (durationSec < 12.0) {
-    durationFactor = Math.max(minDurationFactor, 0.80);
-  } else {
-    durationFactor = Math.max(minDurationFactor, 0.95);
-  }
-  threatScore *= durationFactor;
-  logs.push(`Anomaly Duration: ${durationSec.toFixed(1)}s | DurationFactor: ${durationFactor.toFixed(2)}`);
-
-  // 3. Post-Anomaly Stillness (Real-time detection: anomaly > 0.79 and isStill)
-  if (packet.anomalyScore > 0.79 && isStill) {
-    threatScore += 0.15;
-    logs.push(`Post-Anomaly Stillness detected (+0.15)`);
+  const { cooldownActive = false } = contextConfig;
+  if (cooldownActive) {
+    S_final *= 0.6;
+    S_final_3s *= 0.6;
+    S_final_3m *= 0.6;
+    S_final_5m *= 0.6;
+    logs.push(`Cooldown Active: Threat scores scaled to 60%`);
   }
 
-  // 4. Familiarity Modulation (Amplify if unfamiliar, discount if familiar)
-  // Formula: threatScore = threatScore * (1.3 - 0.6 * familiarityScore)
-  const familiarityFactor = 1.3 - 0.6 * familiarityScore;
-  threatScore *= familiarityFactor;
-  logs.push(`Familiarity Modulation: F=${familiarityScore.toFixed(3)} | Factor=${familiarityFactor.toFixed(2)}`);
-
-  // 5. Wear Confidence
-  if (packet.wearConfidence < 40) {
-    threatScore = 0.0;
-    logs.push(`Wear Confidence ${packet.wearConfidence}% < 40%: SUPPRESSED`);
-  } else if (packet.wearConfidence < 60) {
-    threatScore *= 0.50;
-    logs.push(`Wear Confidence ${packet.wearConfidence}%: 0.50 discount`);
-  } else if (packet.wearConfidence < 80) {
-    threatScore *= 0.80;
-    logs.push(`Wear Confidence ${packet.wearConfidence}%: 0.80 discount`);
+  const wear = packet.wearConfidence !== undefined ? packet.wearConfidence : 100;
+  if (wear < 40) {
+    S_final = 0.0;
+    S_final_3s = 0.0;
+    S_final_3m = 0.0;
+    S_final_5m = 0.0;
+    logs.push(`Wear Confidence ${wear}% < 40%: SUPPRESSED to 0.0`);
   }
 
-  const finalScore = Math.min(Math.max(threatScore, 0.0), 1.0);
-  logs.push(`Final threat score: ${finalScore.toFixed(3)}`);
+  const finalScore = Math.min(Math.max(S_final, 0.0), 1.0);
+  logs.push(`Final Fused Threat Score S_final: ${finalScore.toFixed(3)} (3s: ${S_final_3s.toFixed(2)}, 3m: ${S_final_3m.toFixed(2)}, 5m: ${S_final_5m.toFixed(2)})`);
 
   return {
     score: finalScore,
+    score3s: Math.min(Math.max(S_final_3s, 0.0), 1.0),
+    score3m: Math.min(Math.max(S_final_3m, 0.0), 1.0),
+    score5m: Math.min(Math.max(S_final_5m, 0.0), 1.0),
     explanation: logs
   };
 }

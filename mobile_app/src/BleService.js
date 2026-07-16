@@ -52,8 +52,6 @@
 // The top-level GATT service UUID — acts as a "namespace" for all SafeBand characteristics.
 export const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 
-// Emergency event packet (0x01) — only fires when anomaly threshold is breached.
-export const CHAR_UUID_EVENT = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
 // Command write channel (WRITE with response) — phone sends commands to ESP32.
 // Currently used commands: 0x01 = start streaming, 0x02 = stop streaming,
@@ -148,24 +146,31 @@ export function parseIncomingPacket(bytes) {
   if (!bytes || bytes.length < 2) return null;
   const type = bytes[0]; // First byte is always the packet type identifier
 
-  // Validate XOR checksum — the firmware XORs all payload bytes and appends
-  // the result as the LAST byte. If this doesn't match, the packet was corrupted
-  // in transit and must be discarded silently.
-  const receivedChecksum = bytes[bytes.length - 1];
+  // Determine the expected length based on packet type
+  let expectedLength = bytes.length;
+  if (type === 0x02) expectedLength = 10;
+  else if (type === 0x03) expectedLength = 22;
+  else if (type === 0x04) expectedLength = 46;
+
+  if (bytes.length < expectedLength) {
+    console.warn(`[BLE] Packet too short for type 0x${type.toString(16).toUpperCase()}: expected ${expectedLength}, got ${bytes.length}`);
+    return null;
+  }
+
+  // Validate XOR checksum using expected length
+  const receivedChecksum = bytes[expectedLength - 1];
   let calculatedChecksum = 0;
-  for (let i = 0; i < bytes.length - 1; i++) {
+  for (let i = 0; i < expectedLength - 1; i++) {
     calculatedChecksum ^= bytes[i];
   }
 
   if (calculatedChecksum !== receivedChecksum) {
-    console.warn('[BLE] Checksum mismatch — dropping packet');
+    console.warn(`[BLE] Checksum mismatch for type 0x${type.toString(16).toUpperCase()} — dropping packet. Calc: 0x${calculatedChecksum.toString(16)}, Recv: 0x${receivedChecksum.toString(16)}`);
     return null; // Discard corrupt packet
   }
 
   // Route to the correct parser based on the packet type byte
   switch (type) {
-    case 0x01: // Emergency EVENT packet — anomaly threshold was crossed on-device
-      return parseEventPacket(bytes);
     case 0x02: // STATUS heartbeat packet — periodic health snapshot
       return parseStatusPacket(bytes);
     case 0x03: // SENSOR raw IMU frame — high-rate waveform streaming
@@ -233,7 +238,7 @@ function dequantizeEmbedding(slice) {
 //   [last]  = XOR checksum
 // =============================================================================
 function parseFeaturePacket(bytes) {
-  if (bytes.length < 32) return null;
+  if (bytes.length < 46) return null;
 
   // Reconstruct 16-bit little-endian values from two consecutive bytes
   const eigenvalueRatio = bytes[7] | (bytes[8] << 8);
@@ -242,6 +247,23 @@ function parseFeaturePacket(bytes) {
 
   // Bytes 14–29 are the 16 int8 embedding values from the model output
   const motionEmbedding = dequantizeEmbedding(bytes.slice(14, 30));
+
+  const isThreat = bytes[30];
+
+  const std = (bytes[31] | (bytes[32] << 8)) / 1000.0;
+
+  let skew = bytes[33] | (bytes[34] << 8);
+  if (skew > 32767) skew -= 65536;
+  skew /= 1000.0;
+
+  let kurtosis = bytes[35] | (bytes[36] << 8);
+  if (kurtosis > 32767) kurtosis -= 65536;
+  kurtosis /= 100.0;
+
+  const peak_ratio = (bytes[37] | (bytes[38] << 8)) / 10000.0;
+  const band_energy = (bytes[39] | (bytes[40] << 8)) / 10000.0;
+  const total_variance = (bytes[41] | (bytes[42] << 8)) * 10.0;
+  const accel_gyro_coupling = (bytes[43] | (bytes[44] << 8)) / 1000.0;
 
   return {
     type: 'FEATURE',
@@ -256,65 +278,21 @@ function parseFeaturePacket(bytes) {
     peakAccel,                               // mg units — 1000 ≈ 1g (gravity)
     anomalyDuration,                         // ×100ms — how long anomaly has lasted
     motionEmbedding,                         // 16D float vector for PCA / clustering
-  };
-}
-
-
-// =============================================================================
-// SECTION 6: EVENT Packet Parser (type = 0x01)
-//
-// Fired ONCE by the firmware after 3 consecutive anomalous windows (1.5s of
-// sustained anomaly). This is the hardware-level alert trigger that initiates
-// the emergency pre-alert countdown on the phone (useEmergency.js).
-//
-// Contains the same feature data as FEATURE packets, plus:
-//   - timestamp (seconds since device boot, uint16)
-//   - confidence (0–100% — model confidence in the event classification)
-//   - battery (% at the time of the event)
-//
-// Byte Layout (minimum 34 bytes + 1 checksum):
-//   [0]     = 0x01 (type)
-//   [1]     = sequenceId
-//   [2:3]   = timestamp (uint16 LE, seconds since boot)
-//   [4]     = anomaly score (int8 × 0.00441764)
-//   [5]     = confidence (0–100%)
-//   [6]     = motionState bitmask
-//   [7]     = anomalyDuration (×100ms)
-//   [8:9]   = peakAccel (uint16 LE, mg)
-//   [10]    = dominantFreq encoded (×0.5 for Hz)
-//   [11]    = ZCR
-//   [12]    = spectralEntropy
-//   [13:14] = eigenvalueRatio (uint16 LE)
-//   [15]    = battery (0–100%)
-//   [16]    = wearConfidence (0–100%)
-//   [17:32] = motionEmbedding (16 int8 bytes)
-//   [last]  = XOR checksum
-// =============================================================================
-function parseEventPacket(bytes) {
-  if (bytes.length < 34) return null;
-  
-  // Reconstruct multi-byte fields from little-endian pairs
-  const timestamp = bytes[2] | (bytes[3] << 8);
-  const peakAccel = bytes[8] | (bytes[9] << 8);
-  const eigenvalueRatio = bytes[13] | (bytes[14] << 8);
-  const motionEmbedding = dequantizeEmbedding(bytes.slice(17, 33));
-
-  return {
-    type: 'EVENT',
-    sequenceId: bytes[1],
-    timestamp,                                          // Seconds since device boot
-    anomalyScore: bytes[4] * 0.00441764,              // Model-scale dequantized MAE
-    confidence: bytes[5],                              // 0–100%
-    motionState: bytes[6],                             // Motion bitmask
-    anomalyDuration: bytes[7],                         // ×100ms
-    peakAccel,                                         // mg
-    dominantFreq: bytes[10] * 0.5,                    // Hz
-    zcr: bytes[11],
-    spectralEntropy: bytes[12],
-    eigenvalueRatio,                                   // Linear vs. multidirectional
-    battery: bytes[15],                                // % at time of event
-    wearConfidence: bytes[16],
-    motionEmbedding,                                   // 16D dequantized floats
+    isThreat,                                // 0 = normal, 1 = threat alert event
+    twelveFeatures: [
+      std,
+      peakAccel / 101.97162,                 // peakAccel is in mg, dequantized to m/s^2 (divided by 101.97162)
+      skew,
+      kurtosis,
+      bytes[5] / 255.0,                      // zcr dequantized to [0, 1] range
+      bytes[4] * 0.5,                        // dominantFreq in Hz
+      bytes[6] / 255.0,                      // spectralEntropy dequantized to [0, 1]
+      peak_ratio,
+      band_energy,
+      eigenvalueRatio / 1000.0,              // eigenvalueRatio dequantized to [0, 1]
+      total_variance,
+      accel_gyro_coupling
+    ]
   };
 }
 

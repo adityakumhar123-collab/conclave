@@ -68,7 +68,6 @@ import { Platform, PermissionsAndroid } from 'react-native';
 import {
   parseIncomingPacket,     // Decodes raw bytes → typed JS packet object
   SERVICE_UUID,            // Top-level GATT service UUID
-  CHAR_UUID_EVENT,         // UUID for anomaly event notifications (0x01 packets)
   CHAR_UUID_COMMAND,       // UUID for writing commands to device
   CHAR_UUID_DEVICE_INFO,   // UUID for reading firmware version string on connect
   CHAR_UUID_STATUS,        // UUID for heartbeat/status notifications (0x02 packets)
@@ -306,6 +305,7 @@ export default function useBle(activeTab, addLog) {
           (parsed.zcr !== undefined && parsed.zcr !== prev.zcr) ||
           (parsed.spectralEntropy !== undefined && parsed.spectralEntropy !== prev.spectralEntropy) ||
           (parsed.wearConfidence !== undefined && parsed.wearConfidence !== prev.wearConfidence) ||
+          (parsed.isThreat !== undefined && parsed.isThreat !== prev.isThreat) ||
           // Deep compare the 16D embedding using JSON stringify (fast for small arrays)
           (parsed.motionEmbedding !== undefined && JSON.stringify(parsed.motionEmbedding) !== JSON.stringify(prev.motionEmbedding));
 
@@ -325,6 +325,8 @@ export default function useBle(activeTab, addLog) {
           spectralEntropy: parsed.spectralEntropy !== undefined ? parsed.spectralEntropy : prev.spectralEntropy,
           wearConfidence: parsed.wearConfidence !== undefined ? parsed.wearConfidence : prev.wearConfidence,
           motionEmbedding: parsed.motionEmbedding !== undefined ? parsed.motionEmbedding : prev.motionEmbedding,
+          isThreat: parsed.isThreat !== undefined ? parsed.isThreat : prev.isThreat,
+          twelveFeatures: parsed.twelveFeatures !== undefined ? parsed.twelveFeatures : prev.twelveFeatures,
         };
       });
 
@@ -574,10 +576,17 @@ export default function useBle(activeTab, addLog) {
           }
           try {
             if (characteristic && characteristic.value) {
+              console.log(`[BLE] Received notify on ${charName}: base64 len = ${characteristic.value.length}`);
               // Decode Base64 → raw bytes → parse as a SafeBand packet
               const bytes = base64ToUint8Array(characteristic.value);
+              console.log(`[BLE] Decoded ${charName} bytes len = ${bytes.length}: [${Array.from(bytes).join(', ')}]`);
               const parsed = parseIncomingPacket(bytes);
-              if (parsed) handleIncomingPacket(parsed); // Route to the handler above
+              if (parsed) {
+                console.log(`[BLE] Parsed ${charName} successfully:`, JSON.stringify(parsed));
+                handleIncomingPacket(parsed); // Route to the handler above
+              } else {
+                console.warn(`[BLE] Failed to parse ${charName} packet (ignored)`);
+              }
             }
           } catch (handlerErr) {
             console.error(`[BLE] Error handling characteristic notification for ${charName}:`, handlerErr);
@@ -609,7 +618,6 @@ export default function useBle(activeTab, addLog) {
 
       // List of characteristics to subscribe to for notifications
       const NOTIFY_TARGETS = [
-        { uuid: CHAR_UUID_EVENT,   name: 'EVENT'   }, // Alert events (0x01)
         { uuid: CHAR_UUID_STATUS,  name: 'STATUS'  }, // Heartbeat (0x02)
         { uuid: CHAR_UUID_SENSOR,  name: 'SENSOR'  }, // Raw IMU stream (0x03)
         { uuid: CHAR_UUID_FEATURE, name: 'FEATURE' }, // TinyML inference results (0x04)
@@ -638,31 +646,12 @@ export default function useBle(activeTab, addLog) {
         }
       }
 
-      console.log(`[BLE] Connected. Monitoring ${monitoredCount}/4 characteristics (EVENT, STATUS, SENSOR, FEATURE).`);
-      addLog(`Connected. Monitoring ${monitoredCount}/4 characteristics (EVENT, STATUS, SENSOR, FEATURE).`, 'SYSTEM');
+      console.log(`[BLE] Connected. Monitoring ${monitoredCount}/3 characteristics (STATUS, SENSOR, FEATURE).`);
+      addLog(`Connected. Monitoring ${monitoredCount}/3 characteristics (STATUS, SENSOR, FEATURE).`, 'SYSTEM');
 
-      // Wait 1500ms before sending the start stream command.
-      // This gives BLE descriptor write confirmations time to complete on the device side.
-      // Sending 0x01 too early can cause the first few packets to be lost.
-      setTimeout(async () => {
-        try {
-          if (discoveredDevice) {
-            // 0x01 = START_STREAM command: tells ESP32 to begin sending SENSOR packets
-            const startStreamBase64 = encodeSingleByteBase64(0x01);
-            await discoveredDevice.writeCharacteristicWithResponseForService(
-              SERVICE_UUID,
-              CHAR_UUID_COMMAND,
-              startStreamBase64
-            );
-            setIsStreaming(true);
-            console.log('[BLE] Sent start streaming command (0x01) after descriptor stabilization delay.');
-            addLog('Sent start streaming command (0x01). Stream active.', 'SYSTEM');
-          }
-        } catch (streamCmdErr) {
-          console.warn('[BLE] Failed to write start streaming command:', streamCmdErr.message);
-          addLog(`Start streaming failed: ${streamCmdErr.message}`, 'SYSTEM');
-        }
-      }, 1500);
+      // Do not auto-start high-rate sensor streaming on connect to prevent flooding the BLE link
+      // and causing early disconnections. The user can toggle streaming manually.
+      setIsStreaming(false);
 
       // Register disconnect handler: cleans up state if device drops connection unexpectedly
       bleManagerRef.current.onDeviceDisconnected(deviceId, (error, d) => {

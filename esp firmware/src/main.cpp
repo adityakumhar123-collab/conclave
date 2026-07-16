@@ -89,7 +89,7 @@ void setup() {
     xTaskCreatePinnedToCore(
         ProcessingTask,
         "ProcessingTask",
-        24576,
+        6144,
         nullptr,
         5,
         &processingTaskHandle,
@@ -140,7 +140,7 @@ void IMUSamplerTask(void* pvParameters) {
             // Stream raw data at 25 Hz if streaming is enabled
             if (BLEManager::getInstance().isStreamingEnabled()) {
                 rawStreamDivider++;
-                if (rawStreamDivider >= 4) { // 100 Hz / 4 = 25 Hz
+                if (rawStreamDivider >= 10) { // 100 Hz / 10 = 10 Hz
                     rawStreamDivider = 0;
                     
                     uint16_t msSinceBoot = static_cast<uint16_t>(millis() & 0xFFFF);
@@ -169,7 +169,7 @@ void IMUSamplerTask(void* pvParameters) {
 // 2. Feature Extraction and Anomaly Detection Task
 void ProcessingTask(void* pvParameters) {
     IMUData sample;
-    float features[TOTAL_FEATURES];
+    static float features[TOTAL_FEATURES];
     uint32_t consecutiveAnomalyWindows = 0;
     
     Serial.println("[Task] Processing task active.");
@@ -234,11 +234,26 @@ void ProcessingTask(void* pvParameters) {
                 // Run anomaly detection inference
                 int8_t motionEmbedding[16] = {0};
                 float anomalyScore = ModelRunner::getInstance().runInference(features, motionEmbedding);
-                currentAnomalyScore = anomalyScore;
+                                currentAnomalyScore = anomalyScore;
 
                 // Accumulate statistics for the 30s heartbeat average
                 runningAnomalySum += anomalyScore;
                 runningAnomalyCount++;
+
+                float twelveFeatures[12] = {
+                    features[1203], // std
+                    features[1212], // rms
+                    features[1221], // skew
+                    features[1230], // kurtosis
+                    features[1239], // zcr
+                    features[1278], // dom_freq
+                    features[1284], // entropy
+                    features[1290], // peak_ratio
+                    features[1314], // band_energy
+                    features[1323], // lambda1_ratio
+                    features[1325], // total_variance
+                    (fabsf(features[1327]) + fabsf(features[1328]) + fabsf(features[1329])) / 3.0f // coupling
+                };
 
                 // Correct feature indexing:
                 // dominantFreq of Ax in last sub-window: index 1278
@@ -281,7 +296,9 @@ void ProcessingTask(void* pvParameters) {
                         g_wearConfidence,
                         static_cast<uint16_t>(features[1212] * 1.5f * 101.97162f), // Peak accel proxy (Resultant RMS)
                         static_cast<uint16_t>(consecutiveAnomalyWindows * 5), // Duration in 100ms units
-                        motionEmbedding
+                        motionEmbedding,
+                        0, // isThreat = 0 (Normal)
+                        twelveFeatures
                     );
                 }
 
@@ -299,25 +316,22 @@ void ProcessingTask(void* pvParameters) {
                             if (consecutiveAnomalyWindows >= 11) confidence = 99;
                             else if (consecutiveAnomalyWindows >= 8) confidence = 66;
 
-                            uint16_t secondsSinceBoot = static_cast<uint16_t>(millis() / 1000);
                             uint8_t durationUnits = static_cast<uint8_t>(consecutiveAnomalyWindows * 5); // Stride 50 samples = 0.5s = 5 units
 
-                            uint8_t battery = PowerManager::getInstance().readBatteryPercentage();
-
-                            BLEManager::getInstance().sendEventPacket(
-                                secondsSinceBoot,
+                            BLEManager::getInstance().sendFeaturePacket(
+                                0, // seq
                                 scaledScore,
-                                confidence,
                                 motionState,
-                                durationUnits,
-                                static_cast<uint16_t>(features[1212] * 1.5f * 101.97162f), // Peak accel proxy (Resultant RMS)
                                 static_cast<uint8_t>(dominantFreq * 2.0f),
                                 static_cast<uint8_t>(features[1239] * 255.0f), // ZCR of Resultant
                                 static_cast<uint8_t>(features[1284] * 255.0f), // Spectral Entropy Ax
                                 static_cast<uint16_t>(features[1323] * 1000.0f), // Eigenvalue linearity ratio
-                                battery,
                                 g_wearConfidence,
-                                motionEmbedding
+                                static_cast<uint16_t>(features[1212] * 1.5f * 101.97162f), // Peak accel proxy (Resultant RMS)
+                                static_cast<uint16_t>(consecutiveAnomalyWindows * 5), // Duration in 100ms units
+                                motionEmbedding,
+                                1, // isThreat = 1 (Threat Alert Event!)
+                                twelveFeatures
                             );
                         }
                     }
