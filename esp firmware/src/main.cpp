@@ -74,38 +74,44 @@ void setup() {
     }
 
     // 6. Spawn FreeRTOS Tasks
+    Serial.printf("[Setup] Pre-task spawn free heap: %d bytes, Max block: %d bytes\n", 
+                  ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+
     // Sampler task: High priority (10), runs on Core 1 (default Arduino core)
-    xTaskCreatePinnedToCore(
+    BaseType_t r1 = xTaskCreatePinnedToCore(
         IMUSamplerTask,
         "SamplerTask",
-        4096,
+        3072,
         nullptr,
         10,
         &samplerTaskHandle,
         1
     );
+    Serial.printf("[Setup] SamplerTask spawn result: %s\n", (r1 == pdPASS) ? "SUCCESS" : "FAILED");
 
     // Processing task: Medium priority (5), runs on Core 1 (handles heavy float/FFT maths)
-    xTaskCreatePinnedToCore(
+    BaseType_t r2 = xTaskCreatePinnedToCore(
         ProcessingTask,
         "ProcessingTask",
-        6144,
+        4096,
         nullptr,
         5,
         &processingTaskHandle,
         1
     );
+    Serial.printf("[Setup] ProcessingTask spawn result: %s\n", (r2 == pdPASS) ? "SUCCESS" : "FAILED");
 
     // Heartbeat task: Low priority (2), runs on Core 0 (handles BLE state and slow ADC)
-    xTaskCreatePinnedToCore(
+    BaseType_t r3 = xTaskCreatePinnedToCore(
         HeartbeatTask,
         "HeartbeatTask",
-        4096,
+        3072,
         nullptr,
         2,
         &heartbeatTaskHandle,
         0
     );
+    Serial.printf("[Setup] HeartbeatTask spawn result: %s\n", (r3 == pdPASS) ? "SUCCESS" : "FAILED");
 
     Serial.println("[Setup] FreeRTOS task scheduler started.");
 }

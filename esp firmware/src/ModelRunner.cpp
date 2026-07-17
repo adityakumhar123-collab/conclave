@@ -2,6 +2,7 @@
 #include "Config.h"
 #include "IMUSensor.h"
 #include "model_data.h"
+#include <stdlib.h>
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/tflite_bridge/micro_error_reporter.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -192,8 +193,9 @@ class SafeBandOpResolver : public tflite::MicroMutableOpResolver<40> {
 };
 } // namespace
 
-alignas(16) static uint8_t static_tensor_arena[165 * 1024];
-constexpr int kArenaSize = 165 * 1024;
+constexpr int kArenaSize = 85 * 1024;
+static uint8_t* raw_heap_arena = nullptr;
+static uint8_t* heap_tensor_arena = nullptr;
 
 ModelRunner& ModelRunner::getInstance() {
     static ModelRunner instance;
@@ -212,9 +214,28 @@ extern "C" char g_last_tflm_error[256];
 bool ModelRunner::begin() {
     g_last_tflm_error[0] = '\0';
     Serial.println("[Model] Initializing TensorFlow Lite Micro...");
+    Serial.printf("[Model] Free Heap: %u bytes, Max Contiguous Block: %u bytes\n", 
+                  (unsigned int)ESP.getFreeHeap(), (unsigned int)ESP.getMaxAllocHeap());
+
+    if (!heap_tensor_arena) {
+        // Allocate with 16 bytes of padding to guarantee alignment window
+        raw_heap_arena = (uint8_t*)malloc(kArenaSize + 16);
+        if (!raw_heap_arena) {
+            Serial.printf("[Model] Error: Failed to allocate %d bytes for tensor arena.\n", kArenaSize + 16);
+            return false;
+        }
+        
+        // Align pointer to 16-byte boundary
+        uintptr_t raw_addr = reinterpret_cast<uintptr_t>(raw_heap_arena);
+        uintptr_t aligned_addr = (raw_addr + 15) & ~static_cast<uintptr_t>(15);
+        heap_tensor_arena = reinterpret_cast<uint8_t*>(aligned_addr);
+        
+        Serial.printf("[Model] Dynamically allocated %d bytes (raw: %p, 16-byte aligned: %p).\n", 
+                      kArenaSize + 16, raw_heap_arena, heap_tensor_arena);
+    }
 
     raw_arena = nullptr;
-    tensor_arena = static_tensor_arena;
+    tensor_arena = heap_tensor_arena;
 
     // 1. Get model pointer from C array in model_data.h
     model = (void*)tflite::GetModel(g_model_data);
@@ -259,7 +280,7 @@ bool ModelRunner::begin() {
     resolver.AddGather();
 
     static tflite::MicroInterpreter static_interpreter(
-        (const tflite::Model*)model, resolver, static_tensor_arena, kArenaSize);
+        (const tflite::Model*)model, resolver, heap_tensor_arena, kArenaSize);
     interpreter = &static_interpreter;
 
     // 4. Allocate tensors

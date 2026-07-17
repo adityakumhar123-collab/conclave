@@ -8,14 +8,17 @@ PowerManager& PowerManager::getInstance() {
 
 void PowerManager::begin() {
     // Configure control pin for voltage divider power switch
+    #if defined(VBAT_CTRL_PIN) && VBAT_CTRL_PIN >= 0
     pinMode(VBAT_CTRL_PIN, OUTPUT);
     digitalWrite(VBAT_CTRL_PIN, HIGH); // Turn off by default (HIGH turns off the MOSFET/divider path in XIAO)
+    #endif
     
     // Set up ADC parameters
     analogReadResolution(12); // ESP32 supports 12-bit resolution (0-4095)
 }
 
 float PowerManager::readBatteryVoltage() {
+    #if defined(VBAT_CTRL_PIN) && VBAT_CTRL_PIN >= 0 && defined(VBAT_READ_PIN) && VBAT_READ_PIN >= 0
     // To read the battery voltage, the control pin must be pulled LOW to turn on the divider
     digitalWrite(VBAT_CTRL_PIN, LOW);
     delay(5); // Allow voltage to settle
@@ -33,6 +36,10 @@ float PowerManager::readBatteryVoltage() {
     float batteryVoltage = pinVoltage * VBAT_DIVIDER_RATIO;
     
     return batteryVoltage;
+    #else
+    // Generic ESP32 fallback (no VBAT hardware divider)
+    return 4.0f; // Return a nominal voltage representing a healthy state (~80%)
+    #endif
 }
 
 uint8_t PowerManager::readBatteryPercentage() {

@@ -6,28 +6,22 @@
 // Connection callbacks
 class BLEServerCallbacksImpl : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
+        Serial.println("[BLE_CB] onConnect (simple) callback triggered.");
         BLEManager::getInstance().setConnected(true);
     }
 
     void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override {
+        Serial.println("[BLE_CB] onConnect (param) callback triggered.");
         BLEManager::getInstance().setConnected(true);
-        // Commented out to let phone's OS manage stable defaults, preventing early disconnects
-        /*
-        pServer->updateConnParams(
-            param->connect.remote_bda,
-            24,   // minInterval = 30ms
-            40,   // maxInterval = 50ms
-            0,    // latency = 0
-            400   // timeout = 4s supervision timeout
-        );
-        */
     }
 
     void onDisconnect(BLEServer* pServer) override {
+        Serial.println("[BLE_CB] onDisconnect (simple) callback triggered.");
         BLEManager::getInstance().setConnected(false);
     }
 
     void onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override {
+        Serial.println("[BLE_CB] onDisconnect (param) callback triggered.");
         BLEManager::getInstance().setConnected(false);
     }
 };
@@ -70,7 +64,12 @@ void BLEManager::begin() {
     // Incremented to 0x40 (BLE addr ends in 0x41) to force a full cache rebuild
     // after FEATURE characteristic was not found at 0x30.
     uint8_t customMac[6] = {0x90, 0x70, 0x69, 0x11, 0x69, 0x55};
-    esp_base_mac_addr_set(customMac);
+    esp_err_t macErr = esp_base_mac_addr_set(customMac);
+    if (macErr != ESP_OK) {
+        Serial.printf("[BLE] Warning: Failed to set base MAC address: 0x%x\n", macErr);
+    } else {
+        Serial.println("[BLE] Base MAC address successfully set.");
+    }
     
     // Set MTU before init to avoid packet fragmentation.
     // Default ATT payload is 20 bytes; Sensor packets are 22 bytes, which
@@ -102,7 +101,7 @@ void BLEManager::begin() {
         CHAR_UUID_DEVICE_INFO,
         BLECharacteristic::PROPERTY_READ
     );
-    pCharDeviceInfo->setValue("SafeBand-XIAO-ESP32S3 v1.0.0");
+    pCharDeviceInfo->setValue("SafeBand-ESP32 v1.0.0");
 
     // Create Status Notification Characteristic (Notify)
     pCharStatus = pService->createCharacteristic(
@@ -131,8 +130,26 @@ void BLEManager::begin() {
 
     // Start Advertising
     BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
-    pAdvertising->addServiceUUID(SERVICE_UUID);
+    
+    // Explicitly configure advertising packet payload.
+    // The main advertisement packet fits the flags and the service UUID (21 bytes).
+    // The device name is placed in the Scan Response packet to avoid overflowing the 31-byte BLE limit,
+    // preventing heap corruption/crashes in the BLE GAP controller.
+    BLEAdvertisementData oAdvertisementData;
+    oAdvertisementData.setFlags(0x06); // General discoverable, BR/EDR not supported
+    oAdvertisementData.setCompleteServices(BLEUUID(SERVICE_UUID));
+    pAdvertising->setAdvertisementData(oAdvertisementData);
+    
+    // Scan response data contains the device name
+    BLEAdvertisementData oScanResponseData;
+    oScanResponseData.setName(BLE_DEVICE_NAME);
+    pAdvertising->setScanResponseData(oScanResponseData);
     pAdvertising->setScanResponse(true);
+    
+    // Set connection intervals helpful for iOS/Android stability
+    pAdvertising->setMinPreferred(0x06);
+    pAdvertising->setMinPreferred(0x12);
+    
     BLEDevice::startAdvertising();
     
     Serial.println("[BLE] Service started. Advertising active.");

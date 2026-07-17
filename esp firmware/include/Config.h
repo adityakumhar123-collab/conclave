@@ -31,16 +31,15 @@
 #define HYSTERESIS_WINDOWS 5 // Must exceed threshold for this many windows
 
 // ==========================================
-// Hardware Pin Mappings (Seeed Studio XIAO ESP32S3)
+// Hardware Pin Mappings (Generic ESP32)
 // ==========================================
-#define I2C_SDA_PIN 5 // Default SDA on XIAO ESP32S3 (D4)
-#define I2C_SCL_PIN 6 // Default SCL on XIAO ESP32S3 (D5)
+#define I2C_SDA_PIN 21
+#define I2C_SCL_PIN 22
 
-// Battery read control pins for XIAO ESP32S3:
-// GPIO14 (D3) controls the voltage divider power. Must be LOW to read VBAT.
-// GPIO1 (A0) is VBAT_READ.
-#define VBAT_CTRL_PIN 14
-#define VBAT_READ_PIN 1
+// Battery read control pins:
+// Set to -1 to disable VBAT divider features on generic ESP32
+#define VBAT_CTRL_PIN -1
+#define VBAT_READ_PIN -1
 
 // Battery parameters
 #define ADC_MAX_VALUE 4095
