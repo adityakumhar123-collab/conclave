@@ -215,26 +215,44 @@ void ProcessingTask(void* pvParameters) {
             if (FeatureExtractor::getInstance().addSample(sample, features)) {
                 // A new window of 200 samples is ready (triggered every 50 sample stride)
                 
-                // Monitor wear confidence: track motion variance (trace of covariance matrix at features[1325])
-                float totalVariance = features[1325];
-                if (totalVariance < 100.0f) {
-                    g_stillWindowCount++;
-                } else {
-                    g_stillWindowCount = 0;
-                    g_wearConfidence = 100; // Reset immediately to 100% when active
-                }
+                 // Monitor wear confidence: track motion variance (trace of covariance matrix at features[1325])
+                 float totalVariance = features[1325];
+                 if (totalVariance < 100.0f) {
+                     g_stillWindowCount++;
+                     if (g_stillWindowCount > 120) g_stillWindowCount = 120; // Cap at 1 minute of stillness
+                 } else if (totalVariance > 1000.0f) {
+                     g_stillWindowCount = 0;
+                     g_wearConfidence = 100; // Active movement resets wear state immediately
+                 } else {
+                     // Moderate variance (100 to 1000): decrement still count to allow still hand to stay worn,
+                     // but prevent single table bumps from resetting wear confidence.
+                     if (g_stillWindowCount > 30) {
+                         g_stillWindowCount -= 30; // 15 seconds credit per active window
+                     } else {
+                         g_stillWindowCount = 0;
+                     }
+                     if (g_stillWindowCount <= 60) {
+                         g_wearConfidence = 100;
+                     }
+                 }
 
-                if (g_stillWindowCount > 600) { // 600 windows * 0.5s stride = 5 minutes
-                    // Decay wear confidence from 100% to 0% over the next 5 minutes
-                    float decayFraction = (g_stillWindowCount - 600) / 600.0f;
-                    if (decayFraction > 1.0f) decayFraction = 1.0f;
-                    g_wearConfidence = static_cast<uint8_t>((1.0f - decayFraction) * 100.0f);
-                }
+                 if (g_stillWindowCount > 60) { // 60 windows * 0.5s stride = 30 seconds
+                     // Decay wear confidence from 100% to 0% over the next 30 seconds (total 1 minute to 0%)
+                     float decayFraction = (g_stillWindowCount - 60) / 60.0f;
+                     if (decayFraction > 1.0f) decayFraction = 1.0f;
+                     g_wearConfidence = static_cast<uint8_t>((1.0f - decayFraction) * 100.0f);
+                 }
 
                 // Run anomaly detection inference
                 int8_t motionEmbedding[16] = {0};
                 float anomalyScore = ModelRunner::getInstance().runInference(features, motionEmbedding);
-                                currentAnomalyScore = anomalyScore;
+
+                 // Suppress false-positive anomalies when the device is completely still or unworn and not in an active alarm sequence
+                 if ((totalVariance < 100.0f || g_wearConfidence < 40) && consecutiveAnomalyWindows == 0) {
+                     anomalyScore = 0.0f;
+                 }
+
+                currentAnomalyScore = anomalyScore;
 
                 // Accumulate statistics for the 30s heartbeat average
                 runningAnomalySum += anomalyScore;
@@ -259,11 +277,11 @@ void ProcessingTask(void* pvParameters) {
                 // dominantFreq of Ax in last sub-window: index 1278
                 float dominantFreq = features[1278]; 
 
-                // Motion State Bitmask calculation:
-                // Bit 0: Still, Bit 1: Periodic, Bit 2: Aperiodic, Bit 3: High-Impact, Bit 4: Restrained
-                uint8_t motionState = 0;
-                if (totalVariance < 100.0f) {
-                    motionState |= (1 << 0); // Still
+                 // Motion State Bitmask calculation:
+                 // Bit 0: Still, Bit 1: Periodic, Bit 2: Aperiodic, Bit 3: High-Impact, Bit 4: Restrained
+                 uint8_t motionState = 0;
+                 if (totalVariance < 100.0f) {
+                     motionState |= (1 << 0); // Still
                 } else if (totalVariance > 80000.0f || (features[1212] > 30.0f && totalVariance > 30000.0f)) {
                     motionState |= (1 << 3); // High-Impact
                 } else if (dominantFreq >= 1.0f && dominantFreq <= 3.0f && features[1290] >= 0.35f) {
@@ -272,10 +290,10 @@ void ProcessingTask(void* pvParameters) {
                     motionState |= (1 << 2); // Aperiodic (struggle/random)
                 }
 
-                // Check for post-impact restraint (low variance during alarm countdown)
-                if (consecutiveAnomalyWindows > 6 && totalVariance < 100.0f) {
-                    motionState |= (1 << 4); // Restrained
-                }
+                 // Check for post-impact restraint (low variance during alarm countdown)
+                 if (consecutiveAnomalyWindows > 6 && totalVariance < 100.0f) {
+                     motionState |= (1 << 4); // Restrained
+                 }
 
                 if (ModelRunner::getInstance().isTensorsAllocated()) {
                     motionState |= (1 << 7); // Bit 7: Model Allocated successfully
@@ -393,7 +411,7 @@ void HeartbeatTask(void* pvParameters) {
                     20 // 2.0 Hz inference rate (multiplied by 10)
                 );
                 
-                Serial.printf("[Heartbeat] Status Packet Sent. Uptime: %d mins, Battery: %d%%\n", uptimeMinutes, batteryPct);
+                 Serial.printf("[Heartbeat] Status Packet Sent. Uptime: %d mins, Battery: %d%%, WearConfidence: %d%%\n", uptimeMinutes, batteryPct, wearConfidence);
             }
         }
     }

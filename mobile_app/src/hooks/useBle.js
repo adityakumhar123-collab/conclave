@@ -347,10 +347,11 @@ export default function useBle(activeTab, addLog) {
       // Throttle feature logging: log instantly on anomaly, or periodically every 5 seconds (10 packets at 2 Hz)
       featureLogCounterRef.current++;
       if (parsed.anomalyScore > 1.01309 || featureLogCounterRef.current % 10 === 0) {
+        const totalVarianceVal = parsed.twelveFeatures ? parsed.twelveFeatures[10].toFixed(1) : 'N/A';
         addLog(
           `TinyML Live Features: Score=${parsed.anomalyScore} | ZCR=${parsed.zcr} Entropy=${parsed.spectralEntropy} | ` +
           `Motion=0x${parsed.motionState.toString(16).toUpperCase()} (${motionNames.join('+')}) Freq=${parsed.dominantFreq.toFixed(1)}Hz | ` +
-          `Linearity=${parsed.eigenvalueRatio} Peak=${parsed.peakAccel}mg | Wear=${parsed.wearConfidence}% | Emb=${embStr}`,
+          `Linearity=${parsed.eigenvalueRatio} Peak=${parsed.peakAccel}mg | Wear=${parsed.wearConfidence}% Var=${totalVarianceVal} | Emb=${embStr}`,
           'TINYML'
         );
       }
@@ -400,6 +401,14 @@ export default function useBle(activeTab, addLog) {
       addLog(`Heartbeat: Battery=${parsed.battery}% Wear=${parsed.wearConfidence}% Uptime=${parsed.uptime}m AvgAnomaly=${parsed.avgAnomaly} Inference=${parsed.inferenceRate}Hz Flags=0x${(parsed.systemFlags || 0).toString(16).toUpperCase()}`, 'TINYML');
     }
   };
+
+  // Refs to always hold the latest version of handler callbacks,
+  // preventing stale closures inside the persistent BLE notification monitor callbacks.
+  const handleIncomingPacketRef = useRef(handleIncomingPacket);
+  handleIncomingPacketRef.current = handleIncomingPacket;
+
+  const addLogRef = useRef(addLog);
+  addLogRef.current = addLog;
 
   // =============================================================================
   // BLE Scanning
@@ -560,7 +569,7 @@ export default function useBle(activeTab, addLog) {
             // errorCode 2 = "Device disconnected" — expected, no need to log it
             if (error.errorCode !== 2) {
               console.error(`[BLE] ${charName} notification error:`, error.message);
-              addLog(`BLE error on ${charName}: ${error.message}`, 'SYSTEM');
+              addLogRef.current(`BLE error on ${charName}: ${error.message}`, 'SYSTEM');
             }
             // Defer subscription removal to avoid calling remove() from within the callback
             setTimeout(() => {
@@ -583,14 +592,14 @@ export default function useBle(activeTab, addLog) {
               const parsed = parseIncomingPacket(bytes);
               if (parsed) {
                 console.log(`[BLE] Parsed ${charName} successfully:`, JSON.stringify(parsed));
-                handleIncomingPacket(parsed); // Route to the handler above
+                handleIncomingPacketRef.current(parsed); // Route to the latest handler to prevent stale closures
               } else {
                 console.warn(`[BLE] Failed to parse ${charName} packet (ignored)`);
               }
             }
           } catch (handlerErr) {
             console.error(`[BLE] Error handling characteristic notification for ${charName}:`, handlerErr);
-            addLog(`Error handling ${charName}: ${handlerErr.message}`, 'SYSTEM');
+            addLogRef.current(`Error handling ${charName}: ${handlerErr.message}`, 'SYSTEM');
           }
         };
         return {

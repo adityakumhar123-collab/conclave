@@ -345,9 +345,10 @@ const DashboardTab = React.memo(({
               width: `${Math.min((currentPacket.anomalyScore / 1.1214) * 100, 100)}%`,
               borderRadius: 11,
               backgroundColor:
-                currentPacket.anomalyScore > 1.10 ? '#B91C1C' :
-                  currentPacket.anomalyScore > 1.013 ? '#EF4444' :
-                    currentPacket.anomalyScore > 0.60 ? '#F59E0B' : '#10B981',
+                wearConfidence < 40 ? '#64748B' :
+                  currentPacket.anomalyScore > 1.10 ? '#B91C1C' :
+                    currentPacket.anomalyScore > 1.013 ? '#EF4444' :
+                      currentPacket.anomalyScore > 0.60 ? '#F59E0B' : '#10B981',
             }} />
             {/* Threshold marker at 1.01309 / 1.1214 = 90.3% */}
             <View style={{ position: 'absolute', left: '90.3%', top: 0, width: 2, height: 22, backgroundColor: '#FFFFFF', opacity: 0.6 }} />
@@ -356,7 +357,7 @@ const DashboardTab = React.memo(({
             <Text style={{ color: '#64748B', fontSize: 10 }}>0.000 (Normal)</Text>
             <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: 'bold' }}>
               {currentPacket.anomalyScore.toFixed(4)} / 1.1214
-              {currentPacket.anomalyScore > 1.01309 ? ' ⚠️ FLAGGED' : ' ✓ Normal'}
+              {wearConfidence < 40 ? ' ✓ Unworn' : (currentPacket.anomalyScore > 1.01309 ? ' ⚠️ FLAGGED' : ' ✓ Normal')}
             </Text>
             <Text style={{ color: '#64748B', fontSize: 10 }}>1.1214 (Max)</Text>
           </View>

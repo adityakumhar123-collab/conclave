@@ -503,7 +503,7 @@ export default function App() {
         <Svg height="140" width={width - 48}>
           {/* Threshold line at 128 (middle axis) */}
           <Line x1="0" y1="70" x2={width - 48} y2="70" stroke="#EF4444" strokeWidth="1.5" strokeDasharray="4,4" />
-          <SvgText style={styles.thresholdTextLabel}>anomaly threshold (128)</SvgText>
+          <SvgText x="10" y="65" fill="#EF4444" fontSize="10">anomaly threshold (128)</SvgText>
 
           {/* Draw raw resultant accel stream (blue) */}
           {streamData.length > 1 && (

@@ -371,12 +371,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.2)',
     borderRadius: 12,
   },
-  thresholdTextLabel: {
-    fill: '#EF4444',
-    fontSize: 10,
-    x: 10,
-    y: 65,
-  },
   graphLegendPin: {
     width: 8,
     height: 8,
