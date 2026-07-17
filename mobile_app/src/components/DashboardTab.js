@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, ScrollView, Platform } from 'react-native';
+import { View, Text, TouchableOpacity, ActivityIndicator, ScrollView, Platform, Alert } from 'react-native';
 import Svg, { Circle, Line } from 'react-native-svg';
 import styles from './styles';
 import { LocationEngine } from '../LocationEngine';
@@ -150,7 +150,8 @@ const DashboardTab = React.memo(({
   threatScore5m = 0.0,
   famLevel1 = 1.0,
   famLevel2 = 1.0,
-  famFinal = 1.0
+  famFinal = 1.0,
+  onTestAlert
 }) => {
   const [showPca, setShowPca] = useState(false);
   const [embeddingHistory, setEmbeddingHistory] = useState([]);
@@ -639,6 +640,29 @@ const DashboardTab = React.memo(({
             </Text>
           )}
         </View>
+
+        {/* Manual Test Alert Button */}
+        <TouchableOpacity
+          delayPressIn={0}
+          onPress={() => {
+            if (onTestAlert) {
+              onTestAlert();
+            } else {
+              Alert.alert('Test Alert', 'onTestAlert not wired up yet.');
+            }
+          }}
+          style={{
+            marginTop: 16,
+            paddingVertical: 12,
+            borderRadius: 10,
+            backgroundColor: 'rgba(239, 68, 68, 0.12)',
+            borderWidth: 1,
+            borderColor: '#EF4444',
+            alignItems: 'center',
+          }}
+        >
+          <Text style={{ color: '#EF4444', fontWeight: '700', fontSize: 13 }}>🚨 Test Alert</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Real-time Scrolling Sensor Graph */}

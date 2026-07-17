@@ -624,6 +624,7 @@ export default function App() {
             logsHistoryRef={logsHistoryRef}
             renderedLogs={renderedLogs}
             threatLevel={threatLevel}
+            onTestAlert={triggerEmergencyPreAlert}
           />
         )}
 
