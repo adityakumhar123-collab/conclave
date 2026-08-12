@@ -3,10 +3,6 @@
 
 #include <Arduino.h>
 
-// ==========================================
-// Debug & Hardware Simulation Switches
-// ==========================================
-#define USE_MOCK_IMU false // Set to false to use physical MPU-6050
 
 // ==========================================
 // Sensor and Windowing Settings
@@ -31,20 +27,19 @@
 // ==========================================
 // Anomaly Detection Constants
 // ==========================================
-#define DEFAULT_THRESHOLD 1.008393f // Calculated threshold (mu + 3*sigma)
-#define HYSTERESIS_WINDOWS 3 // Must exceed threshold for this many windows
+#define DEFAULT_THRESHOLD 1.01309f // Calculated threshold (mu + 3*sigma) for Model v2 20-epoch
+#define HYSTERESIS_WINDOWS 5 // Must exceed threshold for this many windows
 
 // ==========================================
-// Hardware Pin Mappings (Seeed Studio XIAO ESP32S3)
+// Hardware Pin Mappings (Generic ESP32)
 // ==========================================
-#define I2C_SDA_PIN 5 // Default SDA on XIAO ESP32S3 (D4)
-#define I2C_SCL_PIN 6 // Default SCL on XIAO ESP32S3 (D5)
+#define I2C_SDA_PIN 21
+#define I2C_SCL_PIN 22
 
-// Battery read control pins for XIAO ESP32S3:
-// GPIO14 (D3) controls the voltage divider power. Must be LOW to read VBAT.
-// GPIO1 (A0) is VBAT_READ.
-#define VBAT_CTRL_PIN 14
-#define VBAT_READ_PIN 1
+// Battery read control pins:
+// Set to -1 to disable VBAT divider features on generic ESP32
+#define VBAT_CTRL_PIN -1
+#define VBAT_READ_PIN -1
 
 // Battery parameters
 #define ADC_MAX_VALUE 4095
@@ -56,7 +51,6 @@
 // ==========================================
 #define BLE_DEVICE_NAME "SafeBand-ESP32"
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CHAR_UUID_EVENT "beb5483e-36e1-4688-b7f5-ea07361b26a8"       // Notify (Emergency)
 #define CHAR_UUID_COMMAND "c083bcf3-4c9b-44c0-9943-228ae92e8fa4"     // Write (Commands)
 #define CHAR_UUID_DEVICE_INFO "d2b781e9-4e78-43e9-92c1-d2a84e92a2a0" // Read (Device Info)
 #define CHAR_UUID_STATUS "8f1f7e34-bb52-4467-b5cc-fb5a8e03e5c9"      // Notify (Heartbeat Status)

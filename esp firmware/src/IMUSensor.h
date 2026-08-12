@@ -2,6 +2,7 @@
 #define IMU_SENSOR_H
 
 #include <Arduino.h>
+#include "Config.h"
 
 struct IMUData {
     float ax; // in g
@@ -12,26 +13,15 @@ struct IMUData {
     float gz; // in dps
 };
 
-enum MockMotionState {
-    MOCK_MOTION_RESTING = 0,
-    MOCK_MOTION_WALKING = 1,
-    MOCK_MOTION_STRUGGLE = 2,
-    MOCK_MOTION_FALL = 3
-};
-
 class IMUSensor {
 public:
     static IMUSensor& getInstance();
 
-    // Initialize sensor or mock generator
+    // Initialize sensor
     bool begin();
 
     // Read latest sample
     bool readSample(IMUData& data);
-
-    // Set mock motion state
-    void setMockState(MockMotionState state);
-    MockMotionState getMockState() const { return mockState; }
 
 private:
     IMUSensor();
@@ -50,15 +40,10 @@ private:
     static const uint8_t REG_WHO_AM_I = 0x75;
     static const uint8_t REG_DATA_START = 0x3B;
 
-    MockMotionState mockState;
-    uint32_t mockSampleIndex;
     bool isInitialized;
 
     bool writeRegister(uint8_t reg, uint8_t value);
     bool readRegisters(uint8_t reg, uint8_t* buffer, uint8_t length);
-
-    // Mock generation helpers
-    void generateMockSample(IMUData& data);
 };
 
 #endif // IMU_SENSOR_H

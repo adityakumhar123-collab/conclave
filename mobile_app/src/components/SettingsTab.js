@@ -9,7 +9,9 @@ const SettingsTab = React.memo(({
   twilioBalance,
   twilioBalanceError,
   checkTwilioBalance,
-  handleToggleGlobalChannel
+  handleToggleGlobalChannel,
+  handleRunReclustering,
+  handleRunCleanup
 }) => {
   // Local state for settings to avoid app-wide lag during typing
   const [userName, setUserName] = useState(dbSettings.user_name || '');
@@ -290,6 +292,28 @@ const SettingsTab = React.memo(({
             onPress={() => checkTwilioBalance(dbSettings.twilio_account_sid, dbSettings.twilio_auth_token)}
           >
             <Text style={styles.bleDeviceConnectText}>Refresh Credit</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Background Services Control Panel */}
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Background Services & ML Tasks</Text>
+        <Text style={styles.multiplierItem}>
+          Trigger background clustering, historical reassignment, and database retention cleanups manually.
+        </Text>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 }}>
+          <TouchableOpacity
+            style={styles.bleDeviceConnectBtn}
+            onPress={handleRunReclustering}
+          >
+            <Text style={styles.bleDeviceConnectText}>Run Reclustering</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.bleDeviceConnectBtn, { backgroundColor: '#475569' }]}
+            onPress={handleRunCleanup}
+          >
+            <Text style={styles.bleDeviceConnectText}>Database Cleanup</Text>
           </TouchableOpacity>
         </View>
       </View>

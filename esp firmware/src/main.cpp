@@ -34,8 +34,11 @@ void HeartbeatTask(void* pvParameters);
 
 void setup() {
     Serial.begin(115200);
-    // Wait for serial to initialize on USB boards
-    delay(1000);
+    // Wait up to 4 seconds for Serial connection on USB boards
+    unsigned long start_time = millis();
+    while (!Serial && (millis() - start_time < 4000)) {
+        delay(10);
+    }
     Serial.println("\n===========================================");
     Serial.println("         SafeBand Firmware Starting        ");
     Serial.println("===========================================");
@@ -58,6 +61,9 @@ void setup() {
 
     // 4. Initialize BLE Stack
     BLEManager::getInstance().begin();
+    if (!(systemFlags & (1 << 3))) {
+        BLEManager::getInstance().setDeviceInfo(ModelRunner::getInstance().getLastError());
+    }
     systemFlags |= (1 << 1); // Set BLE OK
 
     // 5. Create FreeRTOS Queue (capacity: 100 samples)
@@ -68,38 +74,44 @@ void setup() {
     }
 
     // 6. Spawn FreeRTOS Tasks
+    Serial.printf("[Setup] Pre-task spawn free heap: %d bytes, Max block: %d bytes\n", 
+                  ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+
     // Sampler task: High priority (10), runs on Core 1 (default Arduino core)
-    xTaskCreatePinnedToCore(
+    BaseType_t r1 = xTaskCreatePinnedToCore(
         IMUSamplerTask,
         "SamplerTask",
-        4096,
+        3072,
         nullptr,
         10,
         &samplerTaskHandle,
         1
     );
+    Serial.printf("[Setup] SamplerTask spawn result: %s\n", (r1 == pdPASS) ? "SUCCESS" : "FAILED");
 
     // Processing task: Medium priority (5), runs on Core 1 (handles heavy float/FFT maths)
-    xTaskCreatePinnedToCore(
+    BaseType_t r2 = xTaskCreatePinnedToCore(
         ProcessingTask,
         "ProcessingTask",
-        24576,
+        4096,
         nullptr,
         5,
         &processingTaskHandle,
         1
     );
+    Serial.printf("[Setup] ProcessingTask spawn result: %s\n", (r2 == pdPASS) ? "SUCCESS" : "FAILED");
 
     // Heartbeat task: Low priority (2), runs on Core 0 (handles BLE state and slow ADC)
-    xTaskCreatePinnedToCore(
+    BaseType_t r3 = xTaskCreatePinnedToCore(
         HeartbeatTask,
         "HeartbeatTask",
-        4096,
+        3072,
         nullptr,
         2,
         &heartbeatTaskHandle,
         0
     );
+    Serial.printf("[Setup] HeartbeatTask spawn result: %s\n", (r3 == pdPASS) ? "SUCCESS" : "FAILED");
 
     Serial.println("[Setup] FreeRTOS task scheduler started.");
 }
@@ -134,7 +146,7 @@ void IMUSamplerTask(void* pvParameters) {
             // Stream raw data at 25 Hz if streaming is enabled
             if (BLEManager::getInstance().isStreamingEnabled()) {
                 rawStreamDivider++;
-                if (rawStreamDivider >= 4) { // 100 Hz / 4 = 25 Hz
+                if (rawStreamDivider >= 10) { // 100 Hz / 10 = 10 Hz
                     rawStreamDivider = 0;
                     
                     uint16_t msSinceBoot = static_cast<uint16_t>(millis() & 0xFFFF);
@@ -150,7 +162,7 @@ void IMUSamplerTask(void* pvParameters) {
                         sample,
                         resultant,
                         jerk,
-                        static_cast<uint8_t>(fminf((currentAnomalyScore / DEFAULT_THRESHOLD) * 128.0f, 255.0f))
+                        static_cast<uint8_t>(fminf(fmaxf(roundf(currentAnomalyScore / 0.00441764f), 0.0f), 255.0f))
                     );
                 }
             } else {
@@ -163,7 +175,7 @@ void IMUSamplerTask(void* pvParameters) {
 // 2. Feature Extraction and Anomaly Detection Task
 void ProcessingTask(void* pvParameters) {
     IMUData sample;
-    float features[TOTAL_FEATURES];
+    static float features[TOTAL_FEATURES];
     uint32_t consecutiveAnomalyWindows = 0;
     
     Serial.println("[Task] Processing task active.");
@@ -209,39 +221,73 @@ void ProcessingTask(void* pvParameters) {
             if (FeatureExtractor::getInstance().addSample(sample, features)) {
                 // A new window of 200 samples is ready (triggered every 50 sample stride)
                 
-                // Monitor wear confidence: track motion variance (trace of covariance matrix at features[1325])
-                float totalVariance = features[1325];
-                if (totalVariance < 100.0f) {
-                    g_stillWindowCount++;
-                } else {
-                    g_stillWindowCount = 0;
-                    g_wearConfidence = 100; // Reset immediately to 100% when active
-                }
+                 // Monitor wear confidence: track motion variance (trace of covariance matrix at features[1325])
+                 float totalVariance = features[1325];
+                 if (totalVariance < 100.0f) {
+                     g_stillWindowCount++;
+                     if (g_stillWindowCount > 120) g_stillWindowCount = 120; // Cap at 1 minute of stillness
+                 } else if (totalVariance > 1000.0f) {
+                     g_stillWindowCount = 0;
+                     g_wearConfidence = 100; // Active movement resets wear state immediately
+                 } else {
+                     // Moderate variance (100 to 1000): decrement still count to allow still hand to stay worn,
+                     // but prevent single table bumps from resetting wear confidence.
+                     if (g_stillWindowCount > 30) {
+                         g_stillWindowCount -= 30; // 15 seconds credit per active window
+                     } else {
+                         g_stillWindowCount = 0;
+                     }
+                     if (g_stillWindowCount <= 60) {
+                         g_wearConfidence = 100;
+                     }
+                 }
 
-                if (g_stillWindowCount > 600) { // 600 windows * 0.5s stride = 5 minutes
-                    // Decay wear confidence from 100% to 0% over the next 5 minutes
-                    float decayFraction = (g_stillWindowCount - 600) / 600.0f;
-                    if (decayFraction > 1.0f) decayFraction = 1.0f;
-                    g_wearConfidence = static_cast<uint8_t>((1.0f - decayFraction) * 100.0f);
-                }
+                 if (g_stillWindowCount > 60) { // 60 windows * 0.5s stride = 30 seconds
+                     // Decay wear confidence from 100% to 0% over the next 30 seconds (total 1 minute to 0%)
+                     float decayFraction = (g_stillWindowCount - 60) / 60.0f;
+                     if (decayFraction > 1.0f) decayFraction = 1.0f;
+                     g_wearConfidence = static_cast<uint8_t>((1.0f - decayFraction) * 100.0f);
+                 }
 
                 // Run anomaly detection inference
-                float anomalyScore = ModelRunner::getInstance().runInference(features);
+                int8_t motionEmbedding[16] = {0};
+                float anomalyScore = ModelRunner::getInstance().runInference(features, motionEmbedding);
+
+                 // Suppress false-positive anomalies when the device is completely still or unworn and not in an active alarm sequence
+                 if ((totalVariance < 100.0f || g_wearConfidence < 40) && consecutiveAnomalyWindows == 0) {
+                     anomalyScore = 0.0f;
+                 }
+
                 currentAnomalyScore = anomalyScore;
 
                 // Accumulate statistics for the 30s heartbeat average
                 runningAnomalySum += anomalyScore;
                 runningAnomalyCount++;
 
+                float twelveFeatures[12] = {
+                    features[1203], // std
+                    features[1212], // rms
+                    features[1221], // skew
+                    features[1230], // kurtosis
+                    features[1239], // zcr
+                    features[1278], // dom_freq
+                    features[1284], // entropy
+                    features[1290], // peak_ratio
+                    features[1314], // band_energy
+                    features[1323], // lambda1_ratio
+                    features[1325], // total_variance
+                    (fabsf(features[1327]) + fabsf(features[1328]) + fabsf(features[1329])) / 3.0f // coupling
+                };
+
                 // Correct feature indexing:
                 // dominantFreq of Ax in last sub-window: index 1278
                 float dominantFreq = features[1278]; 
 
-                // Motion State Bitmask calculation:
-                // Bit 0: Still, Bit 1: Periodic, Bit 2: Aperiodic, Bit 3: High-Impact, Bit 4: Restrained
-                uint8_t motionState = 0;
-                if (totalVariance < 100.0f) {
-                    motionState |= (1 << 0); // Still
+                 // Motion State Bitmask calculation:
+                 // Bit 0: Still, Bit 1: Periodic, Bit 2: Aperiodic, Bit 3: High-Impact, Bit 4: Restrained
+                 uint8_t motionState = 0;
+                 if (totalVariance < 100.0f) {
+                     motionState |= (1 << 0); // Still
                 } else if (totalVariance > 80000.0f || (features[1212] > 30.0f && totalVariance > 30000.0f)) {
                     motionState |= (1 << 3); // High-Impact
                 } else if (dominantFreq >= 1.0f && dominantFreq <= 3.0f && features[1290] >= 0.35f) {
@@ -250,12 +296,16 @@ void ProcessingTask(void* pvParameters) {
                     motionState |= (1 << 2); // Aperiodic (struggle/random)
                 }
 
-                // Check for post-impact restraint (low variance during alarm countdown)
-                if (consecutiveAnomalyWindows > 6 && totalVariance < 100.0f) {
-                    motionState |= (1 << 4); // Restrained
+                 // Check for post-impact restraint (low variance during alarm countdown)
+                 if (consecutiveAnomalyWindows > 6 && totalVariance < 100.0f) {
+                     motionState |= (1 << 4); // Restrained
+                 }
+
+                if (ModelRunner::getInstance().isTensorsAllocated()) {
+                    motionState |= (1 << 7); // Bit 7: Model Allocated successfully
                 }
 
-                uint8_t scaledScore = static_cast<uint8_t>(fminf((anomalyScore / DEFAULT_THRESHOLD) * 128.0f, 255.0f));
+                uint8_t scaledScore = static_cast<uint8_t>(fminf(fmaxf(roundf(anomalyScore / 0.00441764f), 0.0f), 255.0f));
 
                 // Send live 2 Hz feature stream to the mobile app for dynamic gauges
                 if (BLEManager::getInstance().isConnected()) {
@@ -269,7 +319,10 @@ void ProcessingTask(void* pvParameters) {
                         static_cast<uint16_t>(features[1323] * 1000.0f), // Eigenvalue linearity ratio
                         g_wearConfidence,
                         static_cast<uint16_t>(features[1212] * 1.5f * 101.97162f), // Peak accel proxy (Resultant RMS)
-                        static_cast<uint16_t>(consecutiveAnomalyWindows * 5) // Duration in 100ms units
+                        static_cast<uint16_t>(consecutiveAnomalyWindows * 5), // Duration in 100ms units
+                        motionEmbedding,
+                        0, // isThreat = 0 (Normal)
+                        twelveFeatures
                     );
                 }
 
@@ -284,27 +337,25 @@ void ProcessingTask(void* pvParameters) {
                             
                             // Scale confidence based on persistence
                             uint8_t confidence = 33;
-                            if (consecutiveAnomalyWindows >= 9) confidence = 99;
-                            else if (consecutiveAnomalyWindows >= 6) confidence = 66;
+                            if (consecutiveAnomalyWindows >= 11) confidence = 99;
+                            else if (consecutiveAnomalyWindows >= 8) confidence = 66;
 
-                            uint16_t secondsSinceBoot = static_cast<uint16_t>(millis() / 1000);
                             uint8_t durationUnits = static_cast<uint8_t>(consecutiveAnomalyWindows * 5); // Stride 50 samples = 0.5s = 5 units
 
-                            uint8_t battery = PowerManager::getInstance().readBatteryPercentage();
-
-                            BLEManager::getInstance().sendEventPacket(
-                                secondsSinceBoot,
+                            BLEManager::getInstance().sendFeaturePacket(
+                                0, // seq
                                 scaledScore,
-                                confidence,
                                 motionState,
-                                durationUnits,
-                                static_cast<uint16_t>(features[1212] * 1.5f * 101.97162f), // Peak accel proxy (Resultant RMS)
                                 static_cast<uint8_t>(dominantFreq * 2.0f),
                                 static_cast<uint8_t>(features[1239] * 255.0f), // ZCR of Resultant
                                 static_cast<uint8_t>(features[1284] * 255.0f), // Spectral Entropy Ax
                                 static_cast<uint16_t>(features[1323] * 1000.0f), // Eigenvalue linearity ratio
-                                battery,
-                                g_wearConfidence
+                                g_wearConfidence,
+                                static_cast<uint16_t>(features[1212] * 1.5f * 101.97162f), // Peak accel proxy (Resultant RMS)
+                                static_cast<uint16_t>(consecutiveAnomalyWindows * 5), // Duration in 100ms units
+                                motionEmbedding,
+                                1, // isThreat = 1 (Threat Alert Event!)
+                                twelveFeatures
                             );
                         }
                     }
@@ -347,7 +398,7 @@ void HeartbeatTask(void* pvParameters) {
                 // Calculate 60s rolling average anomaly score
                 uint8_t avgAnomaly = 0;
                 if (runningAnomalyCount > 0) {
-                    avgAnomaly = static_cast<uint8_t>(fminf(((runningAnomalySum / runningAnomalyCount) / DEFAULT_THRESHOLD) * 128.0f, 255.0f));
+                    avgAnomaly = static_cast<uint8_t>(fminf(fmaxf(roundf((runningAnomalySum / runningAnomalyCount) / 0.00441764f), 0.0f), 255.0f));
                     // Reset rolling accumulations
                     runningAnomalySum = 0.0f;
                     runningAnomalyCount = 0;
@@ -366,7 +417,7 @@ void HeartbeatTask(void* pvParameters) {
                     20 // 2.0 Hz inference rate (multiplied by 10)
                 );
                 
-                Serial.printf("[Heartbeat] Status Packet Sent. Uptime: %d mins, Battery: %d%%\n", uptimeMinutes, batteryPct);
+                 Serial.printf("[Heartbeat] Status Packet Sent. Uptime: %d mins, Battery: %d%%, WearConfidence: %d%%\n", uptimeMinutes, batteryPct, wearConfidence);
             }
         }
     }

@@ -5,18 +5,23 @@
 
 // Connection callbacks
 class BLEServerCallbacksImpl : public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override {
+    void onConnect(BLEServer* pServer) override {
+        Serial.println("[BLE_CB] onConnect (simple) callback triggered.");
         BLEManager::getInstance().setConnected(true);
-        pServer->updateConnParams(
-            param->connect.remote_bda,
-            6,    // minInterval = 7.5ms
-            12,   // maxInterval = 15ms
-            0,    // latency = 0
-            400   // timeout = 4s supervision timeout
-        );
+    }
+
+    void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override {
+        Serial.println("[BLE_CB] onConnect (param) callback triggered.");
+        BLEManager::getInstance().setConnected(true);
     }
 
     void onDisconnect(BLEServer* pServer) override {
+        Serial.println("[BLE_CB] onDisconnect (simple) callback triggered.");
+        BLEManager::getInstance().setConnected(false);
+    }
+
+    void onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override {
+        Serial.println("[BLE_CB] onDisconnect (param) callback triggered.");
         BLEManager::getInstance().setConnected(false);
     }
 };
@@ -26,7 +31,8 @@ class BLECharacteristicCallbacksImpl : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* pCharacteristic) override {
         std::string value = pCharacteristic->getValue();
         if (value.length() == 0) return;
-        BLEManager::getInstance().setPendingCommand(static_cast<uint8_t>(value[0]));
+        uint8_t cmd = static_cast<uint8_t>(value[0]);
+        BLEManager::getInstance().processCommand(cmd);
     }
 };
 
@@ -37,7 +43,6 @@ BLEManager& BLEManager::getInstance() {
 
 BLEManager::BLEManager() 
     : pServer(nullptr)
-    , pCharEvent(nullptr)
     , pCharCommand(nullptr)
     , pCharDeviceInfo(nullptr)
     , pCharStatus(nullptr)
@@ -49,7 +54,6 @@ BLEManager::BLEManager()
     , eventAck(false)
     , calibrationRequest(false)
     , pendingCommand(0)
-    , eventSequenceId(0)
     , sensorSequenceId(0)
     , featureSequenceId(0) {}
 
@@ -59,8 +63,13 @@ void BLEManager::begin() {
     // Change base MAC address to bypass Android BLE GATT cache corruption.
     // Incremented to 0x40 (BLE addr ends in 0x41) to force a full cache rebuild
     // after FEATURE characteristic was not found at 0x30.
-    uint8_t customMac[6] = {0x90, 0x70, 0x69, 0x11, 0x69, 0x40};
-    esp_base_mac_addr_set(customMac);
+    uint8_t customMac[6] = {0x90, 0x70, 0x69, 0x11, 0x69, 0x55};
+    esp_err_t macErr = esp_base_mac_addr_set(customMac);
+    if (macErr != ESP_OK) {
+        Serial.printf("[BLE] Warning: Failed to set base MAC address: 0x%x\n", macErr);
+    } else {
+        Serial.println("[BLE] Base MAC address successfully set.");
+    }
     
     // Set MTU before init to avoid packet fragmentation.
     // Default ATT payload is 20 bytes; Sensor packets are 22 bytes, which
@@ -80,13 +89,6 @@ void BLEManager::begin() {
     // Create primary SafeBand Service
     BLEService* pService = pServer->createService(BLEUUID(SERVICE_UUID), 30);
 
-    // Create Event Notification Characteristic (Notify)
-    pCharEvent = pService->createCharacteristic(
-        CHAR_UUID_EVENT,
-        BLECharacteristic::PROPERTY_NOTIFY
-    );
-    pCharEvent->addDescriptor(new BLE2902()); // Standard descriptor for notifications
-
     // Create Command Input Characteristic (Write)
     pCharCommand = pService->createCharacteristic(
         CHAR_UUID_COMMAND,
@@ -99,7 +101,7 @@ void BLEManager::begin() {
         CHAR_UUID_DEVICE_INFO,
         BLECharacteristic::PROPERTY_READ
     );
-    pCharDeviceInfo->setValue("SafeBand-XIAO-ESP32S3 v1.0.0");
+    pCharDeviceInfo->setValue("SafeBand-ESP32 v1.0.0");
 
     // Create Status Notification Characteristic (Notify)
     pCharStatus = pService->createCharacteristic(
@@ -128,11 +130,35 @@ void BLEManager::begin() {
 
     // Start Advertising
     BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
-    pAdvertising->addServiceUUID(SERVICE_UUID);
+    
+    // Explicitly configure advertising packet payload.
+    // The main advertisement packet fits the flags and the service UUID (21 bytes).
+    // The device name is placed in the Scan Response packet to avoid overflowing the 31-byte BLE limit,
+    // preventing heap corruption/crashes in the BLE GAP controller.
+    BLEAdvertisementData oAdvertisementData;
+    oAdvertisementData.setFlags(0x06); // General discoverable, BR/EDR not supported
+    oAdvertisementData.setCompleteServices(BLEUUID(SERVICE_UUID));
+    pAdvertising->setAdvertisementData(oAdvertisementData);
+    
+    // Scan response data contains the device name
+    BLEAdvertisementData oScanResponseData;
+    oScanResponseData.setName(BLE_DEVICE_NAME);
+    pAdvertising->setScanResponseData(oScanResponseData);
     pAdvertising->setScanResponse(true);
+    
+    // Set connection intervals helpful for iOS/Android stability
+    pAdvertising->setMinPreferred(0x06);
+    pAdvertising->setMinPreferred(0x12);
+    
     BLEDevice::startAdvertising();
     
     Serial.println("[BLE] Service started. Advertising active.");
+}
+
+void BLEManager::setDeviceInfo(const char* info) {
+    if (pCharDeviceInfo != nullptr && info != nullptr && strlen(info) > 0) {
+        pCharDeviceInfo->setValue(info);
+    }
 }
 
 void BLEManager::sendStatusPacket(uint8_t batteryPct, uint8_t wearConfidence, uint8_t systemFlags, uint16_t uptimeMinutes, uint8_t avgAnomaly, uint8_t inferenceRate) {
@@ -159,43 +185,6 @@ void BLEManager::sendStatusPacket(uint8_t batteryPct, uint8_t wearConfidence, ui
     pCharStatus->notify();
 }
 
-void BLEManager::sendEventPacket(uint16_t secSinceBoot, uint8_t anomalyScore, uint8_t confidence, uint8_t motionState, uint8_t duration100ms, uint16_t peakResultantAccelMg, uint8_t dominantFreqHz, uint8_t zcr, uint8_t spectralEntropy, uint16_t eigenvalueRatioScaled, uint8_t batteryPct, uint8_t wearConfidence) {
-    if (!deviceConnected) return;
-
-    uint8_t packet[18];
-    packet[0] = 0x01; // Packet Type
-    packet[1] = eventSequenceId++;
-    
-    // Little-endian timestamp (seconds since boot)
-    packet[2] = static_cast<uint8_t>(secSinceBoot & 0xFF);
-    packet[3] = static_cast<uint8_t>((secSinceBoot >> 8) & 0xFF);
-    
-    packet[4] = anomalyScore;
-    packet[5] = confidence;
-    packet[6] = motionState;
-    packet[7] = duration100ms;
-    
-    // Little-endian peak accel
-    packet[8] = static_cast<uint8_t>(peakResultantAccelMg & 0xFF);
-    packet[9] = static_cast<uint8_t>((peakResultantAccelMg >> 8) & 0xFF);
-    
-    packet[10] = dominantFreqHz;
-    packet[11] = zcr;
-    packet[12] = spectralEntropy;
-    
-    // Little-endian eigenvalue ratio
-    packet[13] = static_cast<uint8_t>(eigenvalueRatioScaled & 0xFF);
-    packet[14] = static_cast<uint8_t>((eigenvalueRatioScaled >> 8) & 0xFF);
-    
-    packet[15] = batteryPct;
-    packet[16] = wearConfidence;
-    
-    // Checksum
-    packet[17] = calculateChecksum(packet, 17);
-
-    pCharEvent->setValue(packet, 18);
-    pCharEvent->notify();
-}
 
 void BLEManager::sendSensorPacket(uint16_t msSinceBoot, const IMUData& imu, float resultantAccel, float jerk, uint8_t anomalyScore) {
     if (!deviceConnected || !isStreaming) return;
@@ -252,10 +241,10 @@ void BLEManager::sendSensorPacket(uint16_t msSinceBoot, const IMUData& imu, floa
     pCharSensor->notify();
 }
 
-void BLEManager::sendFeaturePacket(uint8_t seq, uint8_t anomalyScore, uint8_t motionState, uint8_t dominantFreqHz, uint8_t zcr, uint8_t spectralEntropy, uint16_t eigenvalueRatioScaled, uint8_t wearConfidence, uint16_t peakResultantAccelMg, uint16_t durationUnits) {
+void BLEManager::sendFeaturePacket(uint8_t seq, uint8_t anomalyScore, uint8_t motionState, uint8_t dominantFreqHz, uint8_t zcr, uint8_t spectralEntropy, uint16_t eigenvalueRatioScaled, uint8_t wearConfidence, uint16_t peakResultantAccelMg, uint16_t durationUnits, const int8_t* motionEmbedding, uint8_t isThreat, const float* twelveFeatures) {
     if (!deviceConnected) return;
 
-    uint8_t packet[16];
+    uint8_t packet[46];
     packet[0] = 0x04; // Packet Type
     packet[1] = featureSequenceId++;
     packet[2] = anomalyScore;
@@ -278,12 +267,49 @@ void BLEManager::sendFeaturePacket(uint8_t seq, uint8_t anomalyScore, uint8_t mo
     packet[12] = static_cast<uint8_t>(durationUnits & 0xFF);
     packet[13] = static_cast<uint8_t>((durationUnits >> 8) & 0xFF);
     
-    packet[14] = 0x00; // Reserved
+    // Copy the 16-byte motion embedding
+    if (motionEmbedding != nullptr) {
+        memcpy(&packet[14], motionEmbedding, 16);
+    } else {
+        memset(&packet[14], 0, 16);
+    }
     
-    // Checksum
-    packet[15] = calculateChecksum(packet, 15);
+    packet[30] = isThreat;
+    
+    // Convert the 7 missing features to 2-byte scaled integers
+    uint16_t u_std  = (twelveFeatures != nullptr) ? static_cast<uint16_t>(twelveFeatures[0] * 1000.0f) : 0;
+    int16_t s_skew  = (twelveFeatures != nullptr) ? static_cast<int16_t>(twelveFeatures[2] * 1000.0f) : 0;
+    int16_t s_kurt  = (twelveFeatures != nullptr) ? static_cast<int16_t>(twelveFeatures[3] * 100.0f) : 0;
+    uint16_t u_peak = (twelveFeatures != nullptr) ? static_cast<uint16_t>(twelveFeatures[7] * 10000.0f) : 0;
+    uint16_t u_band = (twelveFeatures != nullptr) ? static_cast<uint16_t>(twelveFeatures[8] * 10000.0f) : 0;
+    uint16_t u_var  = (twelveFeatures != nullptr) ? static_cast<uint16_t>(twelveFeatures[10] / 10.0f) : 0;
+    uint16_t u_coup = (twelveFeatures != nullptr) ? static_cast<uint16_t>(twelveFeatures[11] * 1000.0f) : 0;
 
-    pCharFeature->setValue(packet, 16);
+    packet[31] = static_cast<uint8_t>(u_std & 0xFF);
+    packet[32] = static_cast<uint8_t>((u_std >> 8) & 0xFF);
+
+    packet[33] = static_cast<uint8_t>(s_skew & 0xFF);
+    packet[34] = static_cast<uint8_t>((s_skew >> 8) & 0xFF);
+
+    packet[35] = static_cast<uint8_t>(s_kurt & 0xFF);
+    packet[36] = static_cast<uint8_t>((s_kurt >> 8) & 0xFF);
+
+    packet[37] = static_cast<uint8_t>(u_peak & 0xFF);
+    packet[38] = static_cast<uint8_t>((u_peak >> 8) & 0xFF);
+
+    packet[39] = static_cast<uint8_t>(u_band & 0xFF);
+    packet[40] = static_cast<uint8_t>((u_band >> 8) & 0xFF);
+
+    packet[41] = static_cast<uint8_t>(u_var & 0xFF);
+    packet[42] = static_cast<uint8_t>((u_var >> 8) & 0xFF);
+
+    packet[43] = static_cast<uint8_t>(u_coup & 0xFF);
+    packet[44] = static_cast<uint8_t>((u_coup >> 8) & 0xFF);
+
+    // Checksum
+    packet[45] = calculateChecksum(packet, 45);
+
+    pCharFeature->setValue(packet, 46);
     pCharFeature->notify();
 }
 
@@ -333,39 +359,8 @@ void BLEManager::processCommand(uint8_t command) {
             calibrationRequest = true;
             Serial.println("[BLE] Command: Calibration requested.");
             break;
-        case 0x06: // Trigger test alert (QA / demo mode)
-            ModelRunner::getInstance().setTestAlert(true);
-            Serial.println("[BLE] Command: Test alert triggered.");
-            break;
-            
-        // Custom Mock State commands for interactive testing
-        case 0x07:
-#if USE_MOCK_IMU
-            IMUSensor::getInstance().setMockState(MOCK_MOTION_RESTING);
-#endif
-            Serial.println("[BLE] Command: Set Mock state to RESTING.");
-            break;
-        case 0x08:
-#if USE_MOCK_IMU
-            IMUSensor::getInstance().setMockState(MOCK_MOTION_WALKING);
-#endif
-            Serial.println("[BLE] Command: Set Mock state to WALKING.");
-            break;
-        case 0x09:
-#if USE_MOCK_IMU
-            IMUSensor::getInstance().setMockState(MOCK_MOTION_STRUGGLE);
-#endif
-            Serial.println("[BLE] Command: Set Mock state to STRUGGLE.");
-            break;
-        case 0x0A:
-#if USE_MOCK_IMU
-            IMUSensor::getInstance().setMockState(MOCK_MOTION_FALL);
-#endif
-            Serial.println("[BLE] Command: Set Mock state to FALL.");
-            break;
 
         case 0xFF: // Emergency cancel (user confirmed safe)
-            ModelRunner::getInstance().setTestAlert(false);
             eventAck = true;
             Serial.println("[BLE] Command: Emergency cancel.");
             break;

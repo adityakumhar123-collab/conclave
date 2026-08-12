@@ -9,19 +9,12 @@ IMUSensor& IMUSensor::getInstance() {
 }
 
 IMUSensor::IMUSensor() 
-    : mockState(MOCK_MOTION_RESTING)
-    , mockSampleIndex(0)
-    , isInitialized(false) {}
+    : isInitialized(false) {}
 
 bool IMUSensor::begin() {
-#if USE_MOCK_IMU
-    Serial.println("[IMU] Initializing in MOCK mode.");
-    isInitialized = true;
-    mockSampleIndex = 0;
-    return true;
-#else
     Serial.println("[IMU] Initializing MPU-6050 via I2C.");
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setTimeOut(100); // 100ms timeout prevents I2C bus lockups during high-G shakes and vibrations
     
     // Test connection by reading WHO_AM_I
     uint8_t whoAmI = 0;
@@ -71,7 +64,6 @@ bool IMUSensor::begin() {
     isInitialized = true;
     Serial.println("[IMU] MPU-6050 initialized successfully.");
     return true;
-#endif
 }
 
 bool IMUSensor::readSample(IMUData& data) {
@@ -79,10 +71,6 @@ bool IMUSensor::readSample(IMUData& data) {
         return false;
     }
 
-#if USE_MOCK_IMU
-    generateMockSample(data);
-    mockSampleIndex++;
-#else
     uint8_t buffer[14];
     if (!readRegisters(REG_DATA_START, buffer, 14)) {
         return false;
@@ -106,7 +94,22 @@ bool IMUSensor::readSample(IMUData& data) {
     data.gx = static_cast<float>(rawGx) / 65.5f;
     data.gy = static_cast<float>(rawGy) / 65.5f;
     data.gz = static_cast<float>(rawGz) / 65.5f;
-#endif
+
+    // Check if the sensor has gone into sleep mode or locked up (resultant gravity vector is close to 0)
+    float resultant = sqrtf(data.ax*data.ax + data.ay*data.ay + data.az*data.az);
+    if (resultant < 0.1f) {
+        static uint32_t lastWakeAttempt = 0;
+        uint32_t now = millis();
+        if (now - lastWakeAttempt > 1000) {
+            lastWakeAttempt = now;
+            Serial.println("[IMU] Warning: Sleep/Glitch detected (resultant < 0.1g). Attempting auto-wake...");
+            writeRegister(REG_PWR_MGMT_1, 0x00); // Wake up MPU-6050
+            writeRegister(REG_CONFIG, 0x03);      // DLPF
+            writeRegister(REG_ACCEL_CONFIG, 0x10);// 8g range
+            writeRegister(REG_GYRO_CONFIG, 0x08); // 500 dps
+            writeRegister(REG_SMPLRT_DIV, 0x00);  // Sample divider
+        }
+    }
 
     // Convert accelerometer from g to m/s^2 to match training dataset scale (ax_ms2)
     data.ax *= 9.80665f;
@@ -114,110 +117,6 @@ bool IMUSensor::readSample(IMUData& data) {
     data.az *= 9.80665f;
 
     return true;
-}
-
-void IMUSensor::setMockState(MockMotionState state) {
-    if (mockState != state) {
-        mockState = state;
-        mockSampleIndex = 0;
-        Serial.print("[IMU] Mock state changed to: ");
-        Serial.println(state);
-    }
-}
-
-void IMUSensor::generateMockSample(IMUData& data) {
-    // Generate small pseudo-random noise (-0.02 to 0.02)
-    float noiseA_x = (static_cast<float>(rand() % 2000) - 1000.0f) / 50000.0f;
-    float noiseA_y = (static_cast<float>(rand() % 2000) - 1000.0f) / 50000.0f;
-    float noiseA_z = (static_cast<float>(rand() % 2000) - 1000.0f) / 50000.0f;
-    
-    float noiseG_x = (static_cast<float>(rand() % 2000) - 1000.0f) / 20000.0f; // -0.05 to 0.05 dps
-    float noiseG_y = (static_cast<float>(rand() % 2000) - 1000.0f) / 20000.0f;
-    float noiseG_z = (static_cast<float>(rand() % 2000) - 1000.0f) / 20000.0f;
-
-    switch (mockState) {
-        case MOCK_MOTION_RESTING:
-            // Device is flat face-up on a table. Z axis experiences +1.0g gravity.
-            data.ax = 0.0f + noiseA_x;
-            data.ay = 0.0f + noiseA_y;
-            data.az = 1.0f + noiseA_z;
-            data.gx = 0.0f + noiseG_x;
-            data.gy = 0.0f + noiseG_y;
-            data.gz = 0.0f + noiseG_z;
-            break;
-            
-        case MOCK_MOTION_WALKING: {
-            // Rhythmic motion at 1.5 Hz (period of 67 samples at 100Hz)
-            float freq = 1.5f;
-            float t = static_cast<float>(mockSampleIndex) / SAMPLE_RATE_HZ;
-            float omega = 2.0f * M_PI * freq * t;
-            
-            data.ax = 0.15f * sin(omega) + noiseA_x;
-            data.ay = 0.10f * cos(omega) + noiseA_y;
-            data.az = 1.0f + 0.25f * sin(omega * 2.0f) + noiseA_z; // Double freq bounce for gravity
-            data.gx = 40.0f * sin(omega) + noiseG_x;
-            data.gy = 25.0f * cos(omega) + noiseG_y;
-            data.gz = 15.0f * sin(omega) + noiseG_z;
-            break;
-        }
-            
-        case MOCK_MOTION_STRUGGLE: {
-            // High intensity chaotic motion
-            data.ax = ((rand() % 3000) - 1500.0f) / 1000.0f + noiseA_x; // -1.5g to 1.5g
-            data.ay = ((rand() % 3000) - 1500.0f) / 1000.0f + noiseA_y;
-            data.az = ((rand() % 3000) - 1500.0f) / 1000.0f + noiseA_z;
-            
-            data.gx = ((rand() % 6000) - 3000.0f) / 10.0f + noiseG_x;   // -300 to 300 dps
-            data.gy = ((rand() % 6000) - 3000.0f) / 10.0f + noiseG_y;
-            data.gz = ((rand() % 6000) - 3000.0f) / 10.0f + noiseG_z;
-            break;
-        }
-            
-        case MOCK_MOTION_FALL: {
-            // A fall scenario sequence repeated every 500 samples
-            uint32_t stage = mockSampleIndex % 500;
-            
-            if (stage < 150) {
-                // Phase 1: Walking before fall (1.5 seconds)
-                float freq = 1.5f;
-                float omega = 2.0f * M_PI * freq * (static_cast<float>(stage) / SAMPLE_RATE_HZ);
-                data.ax = 0.15f * sin(omega) + noiseA_x;
-                data.ay = 0.10f * cos(omega) + noiseA_y;
-                data.az = 1.0f + 0.25f * sin(omega * 2.0f) + noiseA_z;
-                data.gx = 40.0f * sin(omega) + noiseG_x;
-                data.gy = 25.0f * cos(omega) + noiseG_y;
-                data.gz = 15.0f * sin(omega) + noiseG_z;
-            } 
-            else if (stage >= 150 && stage < 180) {
-                // Phase 2: Free fall (0.3 seconds) — acceleration goes near 0
-                data.ax = 0.05f + noiseA_x * 0.1f;
-                data.ay = 0.05f + noiseA_y * 0.1f;
-                data.az = 0.05f + noiseA_z * 0.1f;
-                data.gx = noiseG_x * 5.0f;
-                data.gy = noiseG_y * 5.0f;
-                data.gz = noiseG_z * 5.0f;
-            } 
-            else if (stage >= 180 && stage < 195) {
-                // Phase 3: Impact (0.15 seconds) — huge acceleration spikes (resultant ~5.5g)
-                data.ax = 4.0f + noiseA_x * 5.0f;
-                data.ay = -3.0f + noiseA_y * 5.0f;
-                data.az = 2.5f + noiseA_z * 5.0f;
-                data.gx = 450.0f + noiseG_x * 50.0f;
-                data.gy = -300.0f + noiseG_y * 50.0f;
-                data.gz = 200.0f + noiseG_z * 50.0f;
-            } 
-            else {
-                // Phase 4: Lying still on side (3 seconds) — Ax has 1.0g gravity, others still
-                data.ax = 1.0f + noiseA_x;
-                data.ay = 0.0f + noiseA_y;
-                data.az = 0.0f + noiseA_z;
-                data.gx = 0.0f + noiseG_x;
-                data.gy = 0.0f + noiseG_y;
-                data.gz = 0.0f + noiseG_z;
-            }
-            break;
-        }
-    }
 }
 
 bool IMUSensor::writeRegister(uint8_t reg, uint8_t value) {
